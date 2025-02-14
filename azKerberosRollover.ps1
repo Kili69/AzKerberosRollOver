@@ -24,7 +24,21 @@ possibility of such damages
     with the new password. The script ueses a Active Directory Account who will be replicated to the Azure AD.
     The user requires the following permissions:
     Entra ID: Hybrid Administrstor
-    Achtvie Directory: 
+    Archvie Directory: Reset Password privilege to the AZUREADSSOACC computer object
+    The script reset the password of the AD user with a randomized password and triggers the Azure Kerberos 
+    object password update
+
+    It is recommended to run the script on the Azure AD connect server as schedule task in the system context
+.PARAMETER AzureADSSOModule
+    Is the full quaified name of the AzuerADSSO.psd1 file. The defaut value is the Micorosoft Azure Connect 
+    program folder c:\Program Files\Microsoft Azure Active Directory Connect\AzureADSSO.psd1
+.PARAMETER RollOverADAccountName
+    Is the SAMAccount Name of the user who has the right to change the AZUREADSSOACC object
+.PARAMETER RollOverAccountUPN
+    Is the UPN used in Azure Entra.ID for the AD user who the the right to change the AZUREREADSSOACC object
+.PARAMETER LogDirectory
+    The directory for the script log file
+
 #>
 param(
     [Parameter(Mandatory=$false)]
@@ -32,11 +46,22 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$RollOverADAccountName = "AzKrbRollOver",
     [Parameter(Mandatory=$false)]
-    [string]$RollOverAccountUPN
+    [string]$RollOverAccountUPN,
+    [Parameter(Mandatory=$false)]
+    [string] $LogDirectory = "C:\ProgramData"
 )
+<#
+.SYNOPSIS 
+    Create a randomized password
+.DESCRIPTION
+    The function create a randomized password string. The string contains uppercase and lowercase characters, 
+    numbers and special characters
+.PARAMETER lenght
+    Is the lenght of the password string. Default value is 32 characters
+#>
 function New-RandomPassword {
     param (
-        [int]$length = 12
+        [int]$length = 32
     )
 
     $chars = @()
@@ -90,8 +115,6 @@ function Write-Log {
 ######################################################
 #region Manage log file
 $ScriptVersion = "20250214"
-#$LogDirectory = "$($env:AllUsersProfile)\AzureSSORollOver"
-$LogDirectory = "C:\temp"
 [int]$MaxLogFileSize = 1048576 #Maximum size of the log file
 if (!(Test-Path -Path $LogDirectory)) {
     New-Item -Path $LogDirectory -ItemType Directory
