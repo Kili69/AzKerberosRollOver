@@ -41,8 +41,9 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$RollOverAccountUPN,
     [Parameter(Mandatory=$false)]
-    [string]$LogPath
-
+    [string]$LogPath,
+    [Parameter	(Mandatory=$false)]
+    [int]$AzureSyncWaitTime = 60
 )
 <#
 .SYNOPSIS
@@ -102,28 +103,51 @@ function Write-Log {
         #Severity of the message
         [Parameter (Mandatory = $true)]
         [Validateset('Error', 'Warning', 'Information', 'Debug') ]
-        $Severity
+        $Severity,
+        [Parameter(Mandatory=$true)]
+        [int]$EventID
+
     )
     #Format the log message and write it to the log file
-    $LogLine = "$(Get-Date -Format "MM/dd/yyyy HH:mm K"), [$Severity], $Message"
+    $LogLine = "$(Get-Date -Format "MM/dd/yyyy HH:mm K"),[$EventID] [$Severity], $Message"
     Add-Content -Path $LogFile -Value $LogLine -ErrorAction SilentlyContinue
     switch ($Severity) {
         'Error'   { 
-            Write-Host $Message -ForegroundColor Red             
+            Write-output $Message -ForegroundColor Red             
             Add-Content -Path $LogFile -Value $Error[0].ScriptStackTrace   -ErrorAction SilentlyContinue
+            Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Error -Message $Message -ErrorAction SilentlyContinue
         }
-        'Warning' { Write-Host $Message -ForegroundColor Yellow}
-        'Information' { Write-Host $Message }
+        'Warning' { 
+            Write-Output $Message 
+            Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Warning -Message $Message -ErrorAction SilentlyContinue
         }
-
+        'Information' { 
+            Write-Output $Message 
+            Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Information -Message $Message -ErrorAction SilentlyContinue
+        }
+    }
 }
 ######################################################
 # Main Script Logic 
 ######################################################
 #region Manage log file
-$ScriptVersion = "20250501"
+$ScriptVersion = "20250502"
 [int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $eventLog = "Application"
+    $source = "AzureKrbRollOver"
+try {   
+
+    # Check if the source exists; if not, create it
+    if (-not [System.Diagnostics.EventLog]::SourceExists($source)) {
+        [System.Diagnostics.EventLog]::CreateEventSource($source, $eventLog)
+    }
+}
+catch {
+    Write-EventLog -logname $eventLog -source "Application" -EventId 0 -EntryType Error -Message "The event source $source could not be created. The script will use the default event source Application"
+    $source = "Application"
+}
+
 if ($LogPath -eq ""){
     $LogFile = "$($env:LOCALAPPDATA)\$($MyInvocation.MyCommand).log" #Name and path of the log file
 } else {
@@ -143,31 +167,35 @@ if (Test-Path $LogFile){
     }
 }
 #endregion
-Write-Log "Script version $ScriptVersion running as $($env:USERNAME)" -Severity Information
+Write-Log "=========================================" -Severity Debug -EventID 0
+Write-Log "Script version $ScriptVersion running as $($env:USERNAME) Debug log: $LogFile" -Severity Information -EventID 3000
+if ($AzureSyncWaitTime -lt 10){
+    Write-Log -Message "AzureSyncWaitTime ($AzureSyncWaitTime seconds) is too low. This value should be at least 10 seconds. The wait time is change to the default value of 60 seconds" -Severity Warning -EventID 3003
+    $AzureSyncWaitTime = 60
+}
 try {
     if (!(Get-Module -Name AzureADSSO)){
         Import-Module $AzureADSSOModule -Force -ErrorAction Stop
-        Write-Log -Message "Imported AzureADSSO Module" -Severity Debug
+        Write-Log -Message "Imported AzureADSSO Module" -Severity Debug -EventID 0
     }
     if (!(Get-Module -Name ActiveDirectory)){
         Import-Module ActiveDirectory -Force -ErrorAction Stop
-        Write-Log -Message "Imported ActiveDirectory Module" -Severity Debug
+        Write-Log -Message "Imported ActiveDirectory Module" -Severity Debug -EventID 0
     }
     if (!(Get-Module ADSync)){
         Import-Module ADSync -Force -ErrorAction Stop
-        Write-Log -Message "Imported ADSync Module" -Severity Debug
+        Write-Log -Message "Imported ADSync Module" -Severity Debug -EventID 0
     }
     #generate a random password for the Kerberos RollOver Account
     $secPwd = New-RandomPassword -length 32 | ConvertTo-SecureString -AsPlainText -Force
-    $secPwd = ConvertTo-SecureString -AsPlainText -String "Password1!" -Force
     #if the UPN match to the active directory UPN read the UPN from the AD account
     if (!$RollOverAccountUPN) {
         $RollOverAccountUPN = (get-ADuser $RollOverADAccountName).UserPrincipalName
     }
     # Reset the Kerberos RollOver Account Password
     Set-ADAccountPassword -Identity $RollOverADAccountName -NewPassword $secPwd -Reset 
-    Write-Log -Message "Reset Password for Kerberos RollOver Account: $RollOverAccountName" -Severity Information
-    Write-Log -Message "wait for replication to complete..." -Severity Debug
+    Write-Log -Message "Reset Password for Kerberos RollOver Account: $RollOverADAccountName" -Severity Information -EventID 3001
+    Write-Log -Message "wait for replication to complete..." -Severity Debug -EventID 0
     Start-ADSyncSyncCycle -PolicyType Delta 
     #wating for the sync to complete
     Start-Sleep -Seconds 60
@@ -175,22 +203,26 @@ try {
     [pscredential]$CredKerbRollOverCred = New-Object System.Management.Automation.PSCredential ("$((Get-ADDomain).NetBIOSName)\$RollOverADAccountName", $secPwd)
     [pscredential]$CredKerbRollOverAzCred = New-Object System.Management.Automation.PSCredential ($RollOverAccountUPN, $secPwd)
     New-AzureADSSOAuthenticationContext -CloudCredentials $CredKerbRollOverAzCred
-    Write-Log -Message "Successfully authenticated to Azure AD" -Severity Information
+    Write-Log -Message "Successfully $RollOverAccountUPN authenticated to Azure AD" -Severity Information -EventID 3002
     #endregion
     #Update the Azure AD SSO Forest with the new Kerberos RollOver Account Password
-    Update-AzureADSSOForest -OnPremCredentials $CredKerbRollOverCred -PreserveCustomPermissionsOnDesktopSsoAccount |Write-Log -Severity Information
-    Write-Log -Message "Updated Azure AD SSO Forest with new Kerberos RollOver Account Password" -Severity Information
+    Update-AzureADSSOForest -OnPremCredentials $CredKerbRollOverCred -PreserveCustomPermissionsOnDesktopSsoAccount 
+    Write-Log -Message "Updated Azure AD SSO Forest with new Kerberos RollOver Account Password" -Severity Information -EventID 3003
 } 
 catch [System.IO.FileNotFoundException] {
-    Write-log -Message "$($Error[0].CategoryInfo.TargetName) Please install the required PowerShell module" -Severity Error
+    if ($Error[0].CategoryInfo.TargetName -like "*AzureADSSO.psd1"){
+        Write-log -Message "$($Error[0].CategoryInfo.TargetName) Take care the script is running on a Microsoft Entra Connect server" -Severity Error -EventID 3100
+    } else {
+        Write-log -Message "$($Error[0].CategoryInfo.TargetName) Please install the required PowerShell module" -Severity Error -EventID 3101
+    }
 } 
 catch [System.AccessViolationException] {
-    Write-log -Message "Access denied error occured while resetting the password for the Kerberos RollOver Account. Please ensure you have the necessary permissions." -Severity Error
+    Write-log -Message "Access denied error occured while resetting the password for the Kerberos RollOver Account. Please ensure you have the necessary permissions." -Severity Error -EventID 3102
 }
 catch {
     if ($Error[0].CategoryInfo.Reason -eq "AdalClaimChallengeException"){
-        Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error
+        Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID
     } else {
-        Write-Log "An error occurred: $_" -Severity Error
+        Write-Log "An error occurred: $_" -Severity Error -EventID 3199
     }
 }
