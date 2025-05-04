@@ -20,6 +20,8 @@ Version 0.1
 Version 0.1.20250501
     Code comments and formatting changes
     New parameter for the log file location
+Version 0.1.20250504
+    addtional error logging
 
 .SYNOPSIS
     This script resets the password of the Kerberos RollOver Account and updates the Azure AD SSO Forest with the new password.
@@ -113,16 +115,16 @@ function Write-Log {
     Add-Content -Path $LogFile -Value $LogLine -ErrorAction SilentlyContinue
     switch ($Severity) {
         'Error'   { 
-            Write-output $Message -ForegroundColor Red             
+            Write-Host $Message -ForegroundColor Red            
             Add-Content -Path $LogFile -Value $Error[0].ScriptStackTrace   -ErrorAction SilentlyContinue
             Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Error -Message $Message -ErrorAction SilentlyContinue
         }
         'Warning' { 
-            Write-Output $Message 
+            Write-host $Message -ForegroundColor Yellow 
             Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Warning -Message $Message -ErrorAction SilentlyContinue
         }
         'Information' { 
-            Write-Output $Message 
+            Write-Host $Message 
             Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Information -Message $Message -ErrorAction SilentlyContinue
         }
     }
@@ -131,7 +133,7 @@ function Write-Log {
 # Main Script Logic 
 ######################################################
 #region Manage log file
-$ScriptVersion = "20250502"
+$ScriptVersion = "20250504"
 [int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $eventLog = "Application"
@@ -219,10 +221,31 @@ catch [System.IO.FileNotFoundException] {
 catch [System.AccessViolationException] {
     Write-log -Message "Access denied error occured while resetting the password for the Kerberos RollOver Account. Please ensure you have the necessary permissions." -Severity Error -EventID 3102
 }
-catch {
-    if ($Error[0].CategoryInfo.Reason -eq "AdalClaimChallengeException"){
-        Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID
-    } else {
-        Write-Log "An error occurred: $_" -Severity Error -EventID 3199
+catch [Microsoft.Identity.Client.MsalException] {
+    switch ($Error[0].CategoryInfo.Reason) {
+        "AdalException" {
+            Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3103
+            break
+          }
+        "AdalUserInteractionRequiredException" {
+            Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3104
+            break
+        }
+        "MsalClientException"{
+            Write-Log -Message "Password Error enforced for $RollOverAccountUPN" -Severity Error -EventID 3105
+            break
+        }
+        Default {
+            Write-Log -Message "An error occurred: $_" -Severity Error -EventID 3198
+            break   
+        }
     }
+    Write-Log -Message $Error[0].Exception -Severity Debug -EventID 0
+}
+catch {
+    Write-Log "An error occurred: $_" -Severity Error -EventID 3199  
+}
+finally {
+    Write-Log -Message $Error[0].Exception -Severity Debug -EventID 0
+    Write-Log "Script finished" -Severity Debug -EventID 0
 }
