@@ -1,7 +1,33 @@
-<#
-Script Info 
+<#PSScriptInfo
 
-Author: Andreas Lucas [MSFT]
+.VERSION 0.1.20250508
+
+.GUID 2efdf5d8-370e-425c-afad-e5951a84f893
+
+.AUTHOR Andreas Lucas [MSFT]
+
+.COMPANYNAME 
+(c) 2021 Microsoft Corporation. All rights reserved.
+
+.COPYRIGHT 
+
+.TAGS 
+Azure, Active Directory, Kerberos, RollOver, Hybrid
+.LICENSEURI 
+
+.PROJECTURI 
+https://github.com/Kili69/AzKerberosRollOver
+
+.ICONURI 
+
+.EXTERNALMODULEDEPENDENCIES 
+
+.REQUIREDSCRIPTS 
+
+.EXTERNALSCRIPTDEPENDENCIES 
+AzureADSSO Module, ActiveDirectory Module
+
+.RELEASENOTES
 
 Disclaimer:
 This sample script is not supported under any Microsoft standard support program or service. 
@@ -15,6 +41,7 @@ interruption, loss of business information, or other pecuniary loss) arising out
 inability to use the sample scripts or documentation, even if Microsoft has been advised of the 
 possibility of such damages
 
+History
 Version 0.1
     Initial version of the script.
 Version 0.1.20250501
@@ -223,7 +250,7 @@ try {
     Start-ADSyncSyncCycle -PolicyType Delta 
     
     #wating for the sync to complete
-    Start-Sleep -Seconds 60
+    Start-Sleep -Seconds $AzureSyncWaitTime
     
     #region connect to Azure AD with the Kerberos RollOver Account
     [pscredential]$CredKerbRollOverCred = New-Object System.Management.Automation.PSCredential ("$((Get-ADDomain).NetBIOSName)\$RollOverADAccountName", $secPwd)
