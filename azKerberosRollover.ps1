@@ -22,6 +22,9 @@ Version 0.1.20250501
     New parameter for the log file location
 Version 0.1.20250504
     addtional error logging
+Version 0.1.20250508
+    detect if the script is running in PS-ISE and use the correct log file name
+    Parameter AzSyncWaitTime  added validation for 15 to 120 seconds
 
 .SYNOPSIS
     This script resets the password of the Kerberos RollOver Account and updates the Azure AD SSO Forest with the new password.
@@ -34,6 +37,11 @@ Version 0.1.20250504
     The Samaccount name of the of the Active Directory Kerberos RollOver Account. Default is AzKrbRollOver. This account must be synchronized to Azure AD
 .PARAMETER RollOverAccountUPN
     The UPN of the Kerberos RollOver Account. 
+.PARAMETER LogPath
+    The path to the log file. Default is $env:LOCALAPPDATA\$($MyInvocation.MyCommand).log. If the path does not exist, the script will use the default location.
+.PARAMETER AzureSyncWaitTime
+    The wait time in seconds for the Azure AD Sync to complete. Default is 60 seconds. The value must be between 15 and 120 seconds.
+    If the value is less than 15 seconds, the script will use the default value of 60 seconds.
 #>
 param(
     [Parameter(Mandatory=$false)]
@@ -44,7 +52,7 @@ param(
     [string]$RollOverAccountUPN,
     [Parameter(Mandatory=$false)]
     [string]$LogPath,
-    [Parameter	(Mandatory=$false)]
+    [Parameter	(Mandatory=$false)][ValidateRange(15, 120)]
     [int]$AzureSyncWaitTime = 60
 )
 <#
@@ -71,7 +79,7 @@ param(
 #>
 function New-RandomPassword {
     param (
-        [int]$length = 12
+        [int]$length = 14
     )
 
     $chars = @()
@@ -129,11 +137,14 @@ function Write-Log {
         }
     }
 }
+
 ######################################################
 # Main Script Logic 
 ######################################################
+
 #region Manage log file
-$ScriptVersion = "20250504"
+$ScriptVersion = "20250508"
+$passwordSize = 32
 [int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $eventLog = "Application"
@@ -146,19 +157,23 @@ try {
     }
 }
 catch {
-    Write-EventLog -logname $eventLog -source "Application" -EventId 0 -EntryType Error -Message "The event source $source could not be created. The script will use the default event source Application"
+    Write-EventLog -logname $eventLog -source "Application" -EventId 0 -EntryType Error -Message "The event source $source could not be created. The script will use the default event source 'Application'"
     $source = "Application"
 }
 
 if ($LogPath -eq ""){
-    $LogFile = "$($env:LOCALAPPDATA)\$($MyInvocation.MyCommand).log" #Name and path of the log file
+    #$LogFile = "$($env:LOCALAPPDATA)\$($MyInvocation.MyCommand).log" #Name and path of the log file
+    $LogFile = "$($env:LOCALAPPDATA)\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log"
 } else {
     if (Test-Path $LogPath){
-        $LogFile = "$LogPath\$($MyInvocation.MyCommand).log" #Name and path of the log file
+        #$LogFile = "$LogPath\$($MyInvocation.MyCommand).log" #Name and path of the log file
+        $LogFile = "$LogPath\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log" #Name and path of the log file
     } else {
-        $LogFile = "$($env:LOCALAPPDATA)\$($MyInvocation.MyCommand).log" #Name and path of the log file
+        #$LogFile = "$($env:LOCALAPPDATA)\$($MyInvocation.MyCommand).log" #Name and path of the log file
+        $LogFile = "$($env:LOCALAPPDATA)\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log" #Name and path of the log file
     }
 }
+
 #Manage the log file size. If the log file is larger than 1MB, rename it to .sav and create a new log file
 if (Test-Path $LogFile){
     if ((Get-Item $LogFile ).Length -gt $MaxLogFileSize){
@@ -169,12 +184,16 @@ if (Test-Path $LogFile){
     }
 }
 #endregion
+
 Write-Log "=========================================" -Severity Debug -EventID 0
 Write-Log "Script version $ScriptVersion running as $($env:USERNAME) Debug log: $LogFile" -Severity Information -EventID 3000
+
+<# can not happen as parameters are validated
 if ($AzureSyncWaitTime -lt 10){
     Write-Log -Message "AzureSyncWaitTime ($AzureSyncWaitTime seconds) is too low. This value should be at least 10 seconds. The wait time is change to the default value of 60 seconds" -Severity Warning -EventID 3003
     $AzureSyncWaitTime = 60
 }
+#>
 try {
     if (!(Get-Module -Name AzureADSSO)){
         Import-Module $AzureADSSOModule -Force -ErrorAction Stop
@@ -188,25 +207,31 @@ try {
         Import-Module ADSync -Force -ErrorAction Stop
         Write-Log -Message "Imported ADSync Module" -Severity Debug -EventID 0
     }
+    
     #generate a random password for the Kerberos RollOver Account
-    $secPwd = New-RandomPassword -length 32 | ConvertTo-SecureString -AsPlainText -Force
+    $secPwd = New-RandomPassword -length $passwordSize | ConvertTo-SecureString -AsPlainText -Force
+    
     #if the UPN match to the active directory UPN read the UPN from the AD account
     if (!$RollOverAccountUPN) {
         $RollOverAccountUPN = (get-ADuser $RollOverADAccountName).UserPrincipalName
     }
+    
     # Reset the Kerberos RollOver Account Password
     Set-ADAccountPassword -Identity $RollOverADAccountName -NewPassword $secPwd -Reset 
     Write-Log -Message "Reset Password for Kerberos RollOver Account: $RollOverADAccountName" -Severity Information -EventID 3001
     Write-Log -Message "wait for replication to complete..." -Severity Debug -EventID 0
     Start-ADSyncSyncCycle -PolicyType Delta 
+    
     #wating for the sync to complete
     Start-Sleep -Seconds 60
+    
     #region connect to Azure AD with the Kerberos RollOver Account
     [pscredential]$CredKerbRollOverCred = New-Object System.Management.Automation.PSCredential ("$((Get-ADDomain).NetBIOSName)\$RollOverADAccountName", $secPwd)
     [pscredential]$CredKerbRollOverAzCred = New-Object System.Management.Automation.PSCredential ($RollOverAccountUPN, $secPwd)
     New-AzureADSSOAuthenticationContext -CloudCredentials $CredKerbRollOverAzCred
     Write-Log -Message "Successfully $RollOverAccountUPN authenticated to Azure AD" -Severity Information -EventID 3002
     #endregion
+
     #Update the Azure AD SSO Forest with the new Kerberos RollOver Account Password
     Update-AzureADSSOForest -OnPremCredentials $CredKerbRollOverCred -PreserveCustomPermissionsOnDesktopSsoAccount 
     Write-Log -Message "Updated Azure AD SSO Forest with new Kerberos RollOver Account Password" -Severity Information -EventID 3003
@@ -215,7 +240,7 @@ catch [System.IO.FileNotFoundException] {
     if ($Error[0].CategoryInfo.TargetName -like "*AzureADSSO.psd1"){
         Write-log -Message "$($Error[0].CategoryInfo.TargetName) Take care the script is running on a Microsoft Entra Connect server" -Severity Error -EventID 3100
     } else {
-        Write-log -Message "$($Error[0].CategoryInfo.TargetName) Please install the required PowerShell module" -Severity Error -EventID 3101
+        Write-log -Message "$($Error[0].CategoryInfo.TargetName) Please install the required PowerShell modules" -Severity Error -EventID 3101
     }
 } 
 catch [System.AccessViolationException] {
