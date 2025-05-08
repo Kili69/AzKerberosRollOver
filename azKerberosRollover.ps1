@@ -251,6 +251,7 @@ try {
     
     #wating for the sync to complete
     Start-Sleep -Seconds $AzureSyncWaitTime
+
     
     #region connect to Azure AD with the Kerberos RollOver Account
     [pscredential]$CredKerbRollOverCred = New-Object System.Management.Automation.PSCredential ("$((Get-ADDomain).NetBIOSName)\$RollOverADAccountName", $secPwd)
