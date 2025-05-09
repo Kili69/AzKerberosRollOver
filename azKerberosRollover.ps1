@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 0.1.20250508
+.VERSION 0.1.20250509
 
 .GUID 2efdf5d8-370e-425c-afad-e5951a84f893
 
@@ -52,6 +52,13 @@ Version 0.1.20250504
 Version 0.1.20250508
     detect if the script is running in PS-ISE and use the correct log file name
     Parameter AzSyncWaitTime  added validation for 15 to 120 seconds
+Version 0.1.20250509
+    Parameter RollOverAccountUPN added validation for UPN format
+    Parameter AzureADSSOModule added validation for the module path
+    Parameter LogPath added validation for the log file path
+    Parameter DoNotStartSync added to skip the Azure AD Sync after resetting the password
+    Parameter RollOverADAccountName added validation for the Samaccount name of the Kerberos RollOver Account
+    If a new line cannot be added the debug log based on a sharing violation, the script will retry 3 times before failing 
 
 .SYNOPSIS
     This script resets the password of the Kerberos RollOver Account and updates the Azure AD SSO Forest with the new password.
@@ -69,18 +76,26 @@ Version 0.1.20250508
 .PARAMETER AzureSyncWaitTime
     The wait time in seconds for the Azure AD Sync to complete. Default is 60 seconds. The value must be between 15 and 120 seconds.
     If the value is less than 15 seconds, the script will use the default value of 60 seconds.
+.PARAMETER DoNotStartSync
+    If this switch is set, the script will not start the Azure AD Sync after resetting the password. This is useful if you want to manually start the sync later.
+    The default is to start the sync automatically after resetting the password. This is usefull if the account is synchronises via Azure clud-Sync
 #>
 param(
     [Parameter(Mandatory=$false)]
+    [ValidatePattern('^([a-zA-Z]:\\|\\\\[a-zA-Z0-9._-]+\\[a-zA-Z0-9.$_-]+)(\\[a-zA-Z0-9._-]+)*\\AzureADSSO.psd1?$')]
     [string]$AzureADSSOModule = "$env:ProgramFiles\Microsoft Azure Active Directory Connect\AzureADSSO.psd1",
     [Parameter(Mandatory=$false)]
+    [ValidatePattern('^[a-zA-Z0-9._-]{1,20}$')]
     [string]$RollOverADAccountName = "AzKrbRollOver",
     [Parameter(Mandatory=$false)]
+    [ValidatePattern("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")]
     [string]$RollOverAccountUPN,
     [Parameter(Mandatory=$false)]
+    [Validatepattern('^([a-zA-Z]:\\|\\\\[a-zA-Z0-9._-]+\\[a-zA-Z0-9.$_-]+)(\\[a-zA-Z0-9._-]+)*\\?$')]
     [string]$LogPath,
     [Parameter	(Mandatory=$false)][ValidateRange(15, 120)]
-    [int]$AzureSyncWaitTime = 60
+    [int]$AzureSyncWaitTime = 60,
+    [switch]$DoNotStartSync
 )
 <#
 .SYNOPSIS
@@ -116,7 +131,31 @@ function New-RandomPassword {
     $chars += [char[]](33..47)  # Special characters ! " # $ % & ' ( ) * + , - . /
 
     $password = -join ((1..$length) | ForEach-Object { $chars | Get-Random })
-    return $password
+    return ConvertTo-SecureString -String $password -AsPlainText -Force
+}
+function New-DebugLogLine {
+    param (
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [string]$LogFile,
+        [Parameter(Mandatory= $true)]
+        [string]$NewLine 
+   )
+    $maxRetries = 3
+    $retryCount = 0
+    $success = $false
+    $waitTime = 5
+    While (-not $success -and $retryCount -lt $maxRetries) {
+        try {
+            Add-Content -Path $LogFile -Value $NewLine
+            $success = $true            
+         } catch {
+            $retryCount++
+            Start-Sleep -Seconds $waitTime
+        }
+    }
+    if (-not $success) {
+        Write-EventLog -LogName $eventLog -Source $source -EventId 3197 -EntryType Error -Message "Error writing to log file: $LogFile. Error: $($_.Exception.Message)"
+    }
 }
 <#
 .SYNOPSIS
@@ -147,20 +186,28 @@ function Write-Log {
     )
     #Format the log message and write it to the log file
     $LogLine = "$(Get-Date -Format "MM/dd/yyyy HH:mm K"),[$EventID] [$Severity], $Message"
-    Add-Content -Path $LogFile -Value $LogLine -ErrorAction SilentlyContinue
+    try{
+        New-DebugLogLine -LogFile $LogFile -NewLine $LogLine 
+    }
+    catch{
+        Write-EventLog -LogName $eventLog -source $source -EventId 3197 -EntryType Error -Message "Error writing to log file: $LogFile. Error: $($_.Exception.Message)"
+    }
     switch ($Severity) {
         'Error'   { 
-            Write-Host $Message -ForegroundColor Red            
-            Add-Content -Path $LogFile -Value $Error[0].ScriptStackTrace   -ErrorAction SilentlyContinue
+            Write-Host $Message -ForegroundColor Red       
+            New-DebugLogLine -LogFile $LogFile -NewLine $Error[0].ScriptStackTrace   -ErrorAction SilentlyContinue
             Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Error -Message $Message -ErrorAction SilentlyContinue
+            break
         }
         'Warning' { 
             Write-host $Message -ForegroundColor Yellow 
             Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Warning -Message $Message -ErrorAction SilentlyContinue
+            break
         }
         'Information' { 
             Write-Host $Message 
             Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Information -Message $Message -ErrorAction SilentlyContinue
+            break
         }
     }
 }
@@ -170,7 +217,7 @@ function Write-Log {
 ######################################################
 
 #region Manage log file
-$ScriptVersion = "20250508"
+$ScriptVersion = "20250509"
 $passwordSize = 32
 [int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -236,7 +283,7 @@ try {
     }
     
     #generate a random password for the Kerberos RollOver Account
-    $secPwd = New-RandomPassword -length $passwordSize | ConvertTo-SecureString -AsPlainText -Force
+    $secPwd = New-RandomPassword -length $passwordSize 
     
     #if the UPN match to the active directory UPN read the UPN from the AD account
     if (!$RollOverAccountUPN) {
@@ -247,8 +294,13 @@ try {
     Set-ADAccountPassword -Identity $RollOverADAccountName -NewPassword $secPwd -Reset 
     Write-Log -Message "Reset Password for Kerberos RollOver Account: $RollOverADAccountName" -Severity Information -EventID 3001
     Write-Log -Message "wait for replication to complete..." -Severity Debug -EventID 0
-    Start-ADSyncSyncCycle -PolicyType Delta 
-    
+    if (!$DoNotStartSync) {
+        # Start the Azure AD Sync to sync the new password to Azure AD
+        Start-ADSyncSyncCycle -PolicyType Delta 
+        Write-Log -Message "Started Azure AD Sync" -Severity Information -EventID 3002
+    } else {
+        Write-Log -Message "Skip starting the Azure AD Sync" -Severity Debug -EventID 0
+    }
     #wating for the sync to complete
     Start-Sleep -Seconds $AzureSyncWaitTime
 
@@ -299,6 +351,8 @@ catch {
     Write-Log "An error occurred: $_" -Severity Error -EventID 3199  
 }
 finally {
-    Write-Log -Message $Error[0].Exception -Severity Debug -EventID 0
+    if ($Error.Count -gt 0) {
+        Write-Log -Message $Error[0].Exception -Severity Debug -EventID 0
+    }
     Write-Log "Script finished" -Severity Debug -EventID 0
 }
