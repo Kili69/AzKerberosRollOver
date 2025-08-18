@@ -8,11 +8,13 @@ This script writes events t the application log and to the Debuglog File. The fo
 |3002    | Information | The rollover account successfully authenticated to Entra.ID            |
 |3003    | Information | Successfully update the Azure Kerberos object                          |
 |3100    | Error       | The AzureADSSO Powershell module is missing                            |
-|3101    | Error       | A Powershell Modeule is missing                                        |
+|3101    | Error       | A Powershell Module is missing                                         |
 |3102    | Error       | A permission error occured while resetting the password                |
-|3103    | Warning     | The AD sync wait time is below 10 sec. The value is change to 60 sec   |
-|3104    | Error       | The user is not excluded from  MFA                                     |
+|3103    | Error       | Multifactor enforced for the reset account                             |
+|3104    | Error       | Multifactor enforced for the reset account                             |
 |3105    | Error       | Password Error, the password is not synced to Entra.ID                 |
+|3106    | Error       | The AzuerADssoACC account could not be found in the global catalog     |
+|3107    | Warning     | The latest password reset doesn't expired the TGT lifetime             |    
 |3197    | Error       | Can not write to log file                                              |
 |3198    | Error       | Unknown authenthentication error                                       |  
 |3199    | Error       | A unexpected error occurs                                              |

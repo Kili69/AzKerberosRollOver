@@ -291,8 +291,8 @@ try {
     $AzureADSsoAcc = Get-ADcomputer -Identity $AzureADSSOAccName -server $DomainName -Properties pwdLastSet
     $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($AzureADSsoAcc.pwdLastSet)
     if (((Get-Date) - $AzureADSsoAccPwdLastSet).Totalhours -le $TGTLifetimeHours) {
-        Write-Log -Message "The AzureADSSOAcc computer account password has never been set. Please set the password for the AzureADSSOAcc computer account before running this script." -Severity Error -EventID 3107
-        return 0x3EA
+        Write-Log -Message "The AzureADSSOAcc last password reset at $AzureADSsoAccPwdLastSet does not exceed the current TGT lifetime of $TGTLifetimeHours hours" -Severity Warning -EventID 3107
+        Throw [System.InvalidOperationException] "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSet does not expired the TGT lifetime"
     }
     
     # Reset the Kerberos RollOver Account Password
@@ -321,6 +321,9 @@ try {
     Update-AzureADSSOForest -OnPremCredentials $CredKerbRollOverCred -PreserveCustomPermissionsOnDesktopSsoAccount 
     Write-Log -Message "Updated Azure AD SSO Forest with new Kerberos RollOver Account Password" -Severity Information -EventID 3003
 } 
+catch [System.InvalidOperationException] {
+    Write-Log -Message "Invalid operation $($_)" -Severity Debug -EventID 0
+} 
 catch [System.IO.FileNotFoundException] {
     if ($Error[0].CategoryInfo.TargetName -like "*AzureADSSO.psd1"){
         Write-log -Message "$($Error[0].CategoryInfo.TargetName) Take care the script is running on a Microsoft Entra Connect server" -Severity Error -EventID 3100
@@ -330,9 +333,8 @@ catch [System.IO.FileNotFoundException] {
 } 
 catch [System.AccessViolationException] {
     Write-log -Message "Access denied error occured while resetting the password for the Kerberos RollOver Account. Please ensure you have the necessary permissions." -Severity Error -EventID 3102
-    return 0x3EC
 }
-<#catch [Microsoft.Identity.Client.MsalException] {
+catch [Microsoft.Identity.Client.MsalException] {
     switch ($Error[0].CategoryInfo.Reason) {
         "AdalException" {
             Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3103
@@ -352,7 +354,7 @@ catch [System.AccessViolationException] {
         }
     }
     Write-Log -Message $Error[0].Exception -Severity Debug -EventID 0
-}#>
+}
 catch {
     Write-Log "An error occurred: $_" -Severity Error -EventID 3199  
 }
