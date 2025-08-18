@@ -59,12 +59,20 @@ Version 0.1.20250509
     Parameter DoNotStartSync added to skip the Azure AD Sync after resetting the password
     Parameter RollOverADAccountName added validation for the Samaccount name of the Kerberos RollOver Account
     If a new line cannot be added the debug log based on a sharing violation, the script will retry 3 times before failing 
+Version 0.1.20250808
+    Added parameter TGTLifetimeHours to check if the password of the AzureADSSOAccount has been changed within the last x hours. Default value is 10 hours.
+    smal bug bugfixes
 
 .SYNOPSIS
     This script resets the password of the Kerberos RollOver Account and updates the Azure AD SSO Forest with the new password.
 .DESCRIPTION
     This script resets the password of the Kerberos RollOver Account and updates the Azure AD SSO Forest with the new password.
     The script uses the AzureADSSO module to perform the update. The script runs as a AD user with privileges to reset the password of the Kerberos RollOver Account.
+
+    Return codes:
+    0x0    Success
+    0x3EA  Missing powershell modules
+
 .PARAMETER AzureADSSOModule
     The path to the AzureADSSO module. Default is default location of the Azure Active Directory Modules C:\Program Files\Microsoft Azure Active Directory Connect\AzureADSSO.psd1
 .PARAMETER RollOverADAccountName
@@ -79,7 +87,9 @@ Version 0.1.20250509
 .PARAMETER DoNotStartSync
     If this switch is set, the script will not start the Azure AD Sync after resetting the password. This is useful if you want to manually start the sync later.
     The default is to start the sync automatically after resetting the password. This is usefull if the account is synchronises via Azure clud-Sync
-#>
+.PARAMETER TGTLifetimeHours
+    The lifetime of the Kerberos Ticket Granting Ticket (TGT) in hours. Default is 10 hours. The value must be between 1 and 23 hours.
+    #>
 param(
     [Parameter(Mandatory=$false)]
     [ValidatePattern('^([a-zA-Z]:\\|\\\\[a-zA-Z0-9._-]+\\[a-zA-Z0-9.$_-]+)(\\[a-zA-Z0-9._-]+)*\\AzureADSSO.psd1?$')]
@@ -95,7 +105,10 @@ param(
     [string]$LogPath,
     [Parameter	(Mandatory=$false)][ValidateRange(15, 120)]
     [int]$AzureSyncWaitTime = 60,
-    [switch]$DoNotStartSync
+    [switch]$DoNotStartSync,
+    [ValidateRange(1, 23)]
+    [Parameter (Mandatory=$false)]
+    [int]$TGTLifetimeHours = 10
 )
 <#
 .SYNOPSIS
@@ -133,96 +146,79 @@ function New-RandomPassword {
     $password = -join ((1..$length) | ForEach-Object { $chars | Get-Random })
     return ConvertTo-SecureString -String $password -AsPlainText -Force
 }
-function New-DebugLogLine {
-    param (
-        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
-        [string]$LogFile,
-        [Parameter(Mandatory= $true)]
-        [string]$NewLine 
-   )
-    $maxRetries = 3
-    $retryCount = 0
-    $success = $false
-    $waitTime = 5
-    While (-not $success -and $retryCount -lt $maxRetries) {
-        try {
-            Add-Content -Path $LogFile -Value $NewLine
-            $success = $true            
-         } catch {
-            $retryCount++
-            Start-Sleep -Seconds $waitTime
-        }
-    }
-    if (-not $success) {
-        Write-EventLog -LogName $eventLog -Source $source -EventId 3197 -EntryType Error -Message "Error writing to log file: $LogFile. Error: $($_.Exception.Message)"
-    }
-}
 <#
 .SYNOPSIS
-    Write status message to the console and to the log file
+    Write event to the event log and the debug log file
 .DESCRIPTION
-    the script status messages are writte to the log file located in the app folder. the the execution date and detailed error messages
-    The log file syntax is [current data and time],[severity],[Message]
-    On error message the current stack trace will be written to the log file
+    This function will write all events to the log file. If the severity is debug the message will only be written to the debug log file
+    This function replaced the write-eventlog and write-host cmdlets in this script
+.OUTPUTS
+    None
+.FUNCTIONALITY
+    Write event to the log file and event log
 .PARAMETER Message
-    status message written to the console and to the logfile
+    Is the message body of the event
 .PARAMETER Severity
-    is the severity of the status message. Values are Error, Warning, Information and Debug. Except Debug all messages will be written 
-    to the console
+    Is the event severity. Supported severities are: Debug, Information, Warning and Error
+.PARAMETER EventID
+    Is the event ID logged in the application log
+.EXAMPLE
+    write-log -Message "My message" - Severity Information -EventID 0
+        This will create a new log line in the debug log file, create a eventlog entry in the application log and writes the 
+        message parameter to the console
 #>
 function Write-Log {
     param (
         # status message
-        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
-        [string]
-        $Message,
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
         #Severity of the message
         [Parameter (Mandatory = $true)]
         [Validateset('Error', 'Warning', 'Information', 'Debug') ]
         $Severity,
-        [Parameter(Mandatory=$true)]
+        #Event ID
+        [Parameter (Mandatory = $true)]
         [int]$EventID
-
     )
+
+
     #Format the log message and write it to the log file
-    $LogLine = "$(Get-Date -Format "MM/dd/yyyy HH:mm K"),[$EventID] [$Severity], $Message"
-    try{
-        New-DebugLogLine -LogFile $LogFile -NewLine $LogLine 
-    }
-    catch{
-        Write-EventLog -LogName $eventLog -source $source -EventId 3197 -EntryType Error -Message "Error writing to log file: $LogFile. Error: $($_.Exception.Message)"
-    }
+    $LogLine = "$(Get-Date -Format o),$($PID), [$Severity],[$EventID], $Message"
+    Add-Content -Path $LogFile -Value $LogLine 
+    #If the severity is not debug write the even to the event log and format the output
     switch ($Severity) {
-        'Error'   { 
-            Write-Host $Message -ForegroundColor Red       
-            New-DebugLogLine -LogFile $LogFile -NewLine $Error[0].ScriptStackTrace   -ErrorAction SilentlyContinue
-            Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Error -Message $Message -ErrorAction SilentlyContinue
-            break
+        'Error' { 
+            Write-Host $Message -ForegroundColor Red
+            Add-Content -Path $LogFile -Value $Error[0].ScriptStackTrace 
+            Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Error -Message $Message 
         }
         'Warning' { 
-            Write-host $Message -ForegroundColor Yellow 
-            Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Warning -Message $Message -ErrorAction SilentlyContinue
-            break
+            Write-Host $Message -ForegroundColor Yellow 
+            Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Warning -Message $Message
         }
         'Information' { 
             Write-Host $Message 
-            Write-EventLog -LogName $eventLog -Source $source -EventId $EventID -EntryType Information -Message $Message -ErrorAction SilentlyContinue
-            break
+            Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Information -Message $Message
         }
     }
 }
+
+#region Script Variables
+
+$ScriptVersion = "0.1.20250818"
+$passwordSize = 32
+$eventLog = "Application"
+$source = "AzureKrbRollOver"
+[int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$AzureADSSOAccName = "AzureADSSOAcc"
+#endregion
 
 ######################################################
 # Main Script Logic 
 ######################################################
 
 #region Manage log file
-$ScriptVersion = "20250509"
-$passwordSize = 32
-[int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $eventLog = "Application"
-    $source = "AzureKrbRollOver"
 try {   
 
     # Check if the source exists; if not, create it
@@ -231,19 +227,16 @@ try {
     }
 }
 catch {
-    Write-EventLog -logname $eventLog -source "Application" -EventId 0 -EntryType Error -Message "The event source $source could not be created. The script will use the default event source 'Application'"
-    $source = "Application"
+    Write-EventLog -logname $eventLog -source "Application" -EventId 0 -EntryType Error -Message "The event source $source could not be created. The script $($MyInvocation.MyCommand) is terminated. Please run the script with elevated privileges or create the Event source $source manually."
+    return 0x3EA 
 }
 
 if ($LogPath -eq ""){
-    #$LogFile = "$($env:LOCALAPPDATA)\$($MyInvocation.MyCommand).log" #Name and path of the log file
     $LogFile = "$($env:LOCALAPPDATA)\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log"
 } else {
     if (Test-Path $LogPath){
-        #$LogFile = "$LogPath\$($MyInvocation.MyCommand).log" #Name and path of the log file
-        $LogFile = "$LogPath\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log" #Name and path of the log file
+       $LogFile = "$LogPath\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log" #Name and path of the log file
     } else {
-        #$LogFile = "$($env:LOCALAPPDATA)\$($MyInvocation.MyCommand).log" #Name and path of the log file
         $LogFile = "$($env:LOCALAPPDATA)\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log" #Name and path of the log file
     }
 }
@@ -259,16 +252,13 @@ if (Test-Path $LogFile){
 }
 #endregion
 
-Write-Log "=========================================" -Severity Debug -EventID 0
+Write-Log "=========================================" -Severity Debug -EventID 0 
 Write-Log "Script version $ScriptVersion running as $($env:USERNAME) Debug log: $LogFile" -Severity Information -EventID 3000
+Write-Log -Message "The script started with $($MyInvocation.Line) - Process ID $($PID)" -Severity Debug -EventID 0
+Write-Log -Message "Current user $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Severity Debug -EventID 0 
 
-<# can not happen as parameters are validated
-if ($AzureSyncWaitTime -lt 10){
-    Write-Log -Message "AzureSyncWaitTime ($AzureSyncWaitTime seconds) is too low. This value should be at least 10 seconds. The wait time is change to the default value of 60 seconds" -Severity Warning -EventID 3003
-    $AzureSyncWaitTime = 60
-}
-#>
 try {
+    #Import the required modules
     if (!(Get-Module -Name AzureADSSO)){
         Import-Module $AzureADSSOModule -Force -ErrorAction Stop
         Write-Log -Message "Imported AzureADSSO Module" -Severity Debug -EventID 0
@@ -288,6 +278,21 @@ try {
     #if the UPN match to the active directory UPN read the UPN from the AD account
     if (!$RollOverAccountUPN) {
         $RollOverAccountUPN = (get-ADuser $RollOverADAccountName).UserPrincipalName
+    }
+    $GlobalCatalogServer = (Get-ADDomainController -Discover -Service GlobalCatalog).Name
+    $AzureADSsoAcc = Get-ADComputer -Filter {Name -eq $AzureADSSOAccName } -Server $GlobalCatalogServer -Properties CanonicalName
+    if (!$AzureADSsoAcc) {
+        Write-Log -Message "AzureADSSOAcc computer account not found in the Global Catalog. Please ensure the Azure AD Connect is installed and configured." -Severity Error -EventID 3106
+        return 0x3EA
+    }
+    #extracting domain name from the AzureADSSOAcc computer account
+    $AzureADSsoAcc.CanonicalName -match "[^/]+" |Out-Null
+    $DomainName = $matches[0] 
+    $AzureADSsoAcc = Get-ADcomputer -Identity $AzureADSSOAccName -server $DomainName -Properties pwdLastSet
+    $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($AzureADSsoAcc.pwdLastSet)
+    if (((Get-Date) - $AzureADSsoAccPwdLastSet).Totalhours -le $TGTLifetimeHours) {
+        Write-Log -Message "The AzureADSSOAcc computer account password has never been set. Please set the password for the AzureADSSOAcc computer account before running this script." -Severity Error -EventID 3107
+        return 0x3EA
     }
     
     # Reset the Kerberos RollOver Account Password
@@ -325,8 +330,9 @@ catch [System.IO.FileNotFoundException] {
 } 
 catch [System.AccessViolationException] {
     Write-log -Message "Access denied error occured while resetting the password for the Kerberos RollOver Account. Please ensure you have the necessary permissions." -Severity Error -EventID 3102
+    return 0x3EC
 }
-catch [Microsoft.Identity.Client.MsalException] {
+<#catch [Microsoft.Identity.Client.MsalException] {
     switch ($Error[0].CategoryInfo.Reason) {
         "AdalException" {
             Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3103
@@ -346,7 +352,7 @@ catch [Microsoft.Identity.Client.MsalException] {
         }
     }
     Write-Log -Message $Error[0].Exception -Severity Debug -EventID 0
-}
+}#>
 catch {
     Write-Log "An error occurred: $_" -Severity Error -EventID 3199  
 }
