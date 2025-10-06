@@ -62,6 +62,13 @@ Version 0.1.20250509
 Version 0.1.20250808
     Added parameter TGTLifetimeHours to check if the password of the AzureADSSOAccount has been changed within the last x hours. Default value is 10 hours.
     smal bug bugfixes
+Version 0.1.20251006
+    Parameter validation is now in the code on on the parameter level
+    Fixed a bug if the script runs in PSISE the log file name is now correct
+    If unsupported parameter values are used the script will now use the default values
+    if the tgtlifetime is set to 0 the AzureADSSO check is skipped
+    New event IDs for better error handling added. see EventID.md for details
+    
 
 .SYNOPSIS
     This script resets the password of the Kerberos RollOver Account and updates the Azure AD SSO Forest with the new password.
@@ -85,28 +92,22 @@ Version 0.1.20250808
     The wait time in seconds for the Azure AD Sync to complete. Default is 60 seconds. The value must be between 15 and 120 seconds.
     If the value is less than 15 seconds, the script will use the default value of 60 seconds.
 .PARAMETER DoNotStartSync
-    If this switch is set, the script will not start the Azure AD Sync after resetting the password. This is useful if you want to manually start the sync later.
-    The default is to start the sync automatically after resetting the password. This is usefull if the account is synchronises via Azure clud-Sync
+    If this switch is set, the script will not start the Azure AD Sync after resetting the password. The default is to start the sync automatically after resetting the password. This is useful if the account is synchronizes via Azure cloud-Sync
 .PARAMETER TGTLifetimeHours
     The lifetime of the Kerberos Ticket Granting Ticket (TGT) in hours. Default is 10 hours. The value must be between 1 and 23 hours.
     #>
 param(
     [Parameter(Mandatory=$false)]
-    [ValidatePattern('^([a-zA-Z]:\\|\\\\[a-zA-Z0-9._-]+\\[a-zA-Z0-9.$_-]+)(\\[a-zA-Z0-9._-]+)*\\AzureADSSO.psd1?$')]
     [string]$AzureADSSOModule = "$env:ProgramFiles\Microsoft Azure Active Directory Connect\AzureADSSO.psd1",
     [Parameter(Mandatory=$false)]
-    [ValidatePattern('^[a-zA-Z0-9._-]{1,20}$')]
     [string]$RollOverADAccountName = "AzKrbRollOver",
     [Parameter(Mandatory=$false)]
-    [ValidatePattern("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")]
     [string]$RollOverAccountUPN,
     [Parameter(Mandatory=$false)]
-    [Validatepattern('^([a-zA-Z]:\\|\\\\[a-zA-Z0-9._-]+\\[a-zA-Z0-9.$_-]+)(\\[a-zA-Z0-9._-]+)*\\?$')]
     [string]$LogPath,
-    [Parameter	(Mandatory=$false)][ValidateRange(15, 120)]
+    [Parameter	(Mandatory=$false)]
     [int]$AzureSyncWaitTime = 60,
     [switch]$DoNotStartSync,
-    [ValidateRange(1, 23)]
     [Parameter (Mandatory=$false)]
     [int]$TGTLifetimeHours = 10
 )
@@ -184,7 +185,7 @@ function Write-Log {
 
     #Format the log message and write it to the log file
     $LogLine = "$(Get-Date -Format o),$($PID), [$Severity],[$EventID], $Message"
-    Add-Content -Path $LogFile -Value $LogLine 
+    Add-Content -Path $LogFile -Value $LogLine -Force
     #If the severity is not debug write the even to the event log and format the output
     switch ($Severity) {
         'Error' { 
@@ -205,10 +206,14 @@ function Write-Log {
 
 #region Script Variables
 
-$ScriptVersion = "0.1.20250818"
+$ScriptVersion = "0.1.20251006"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"
+$AzSyncWaitTimeMin = 15
+$AzSyncWaitTimeMax = 900
+$TGTLifetimeHoursMin = 0
+$TGTLifetimeHoursMax = 24
 [int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $AzureADSSOAccName = "AzureADSSOAcc"
@@ -232,14 +237,13 @@ catch {
 }
 
 if ($LogPath -eq ""){
-    $LogFile = "$($env:LOCALAPPDATA)\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log"
+    $LogPath = $env:LOCALAPPDATA
 } else {
-    if (Test-Path $LogPath){
-       $LogFile = "$LogPath\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log" #Name and path of the log file
-    } else {
-        $LogFile = "$($env:LOCALAPPDATA)\$(If($PSISE){$psise.CurrentFile.DisplayName}else{$MyInvocation.MyCommand}).log" #Name and path of the log file
+    if (!Test-Path $LogPath){
+        $LogPath = $env:LOCALAPPDATA
     }
 }
+$LogFile = "$LogPath\$(if($psise) {[System.IO.Path]::GetFileNameWithoutExtension($psise.CurrentFile.FullPath)} else {$MyInvocation.MyCommand}).log"
 
 #Manage the log file size. If the log file is larger than 1MB, rename it to .sav and create a new log file
 if (Test-Path $LogFile){
@@ -249,7 +253,7 @@ if (Test-Path $LogFile){
         }
         Rename-Item -Path $LogFile -NewName "$logFile.sav"
     }
-}
+} 
 #endregion
 
 Write-Log "=========================================" -Severity Debug -EventID 0 
@@ -258,7 +262,7 @@ Write-Log -Message "The script started with $($MyInvocation.Line) - Process ID $
 Write-Log -Message "Current user $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Severity Debug -EventID 0 
 
 try {
-    #Import the required modules
+    #region Import the required modules
     if (!(Get-Module -Name AzureADSSO)){
         Import-Module $AzureADSSOModule -Force -ErrorAction Stop
         Write-Log -Message "Imported AzureADSSO Module" -Severity Debug -EventID 0
@@ -271,7 +275,34 @@ try {
         Import-Module ADSync -Force -ErrorAction Stop
         Write-Log -Message "Imported ADSync Module" -Severity Debug -EventID 0
     }
-    
+
+    #endregion
+    #region Validate parameters
+    #region Validate the Azure Sync Wait Time. 
+
+    if ($AzureSyncWaitTime -lt $AzSyncWaitTimeMin){
+            Write-log -Message "The azure wait time $AzSyncWaitTime seconds to synchronize the password is to low. It must be higher then $AzSyncWaitTimeMin seconds" -Severity Warning -EventID 3100
+            $AzSyncWaitTime = $AzSyncWaitTimeMin
+    } elseif ($AzureSyncWaitTime -gt $AzSyncWaitTimeMax){
+            Write-Log -Message -"the azure wait time $AzSynWaitTime seconds exceed the maximum value of $AzSyncWaitTimeMax seconds" -Severity Warning -EventID 3101
+            $AzSyncWaitTime = $AzSyncWaitTimeMax
+    }
+    #endregion 
+    #region validate the TGT lifetime hours
+    if ($TGTLifetimeHours -lt $TGTLifetimeHoursMin){
+        Write-Log "The TGTLifeTime parameter is lower then $TGTLifeTimeHoursMin. Using $TGTLifeTimeHoursMin" -Severity Warning -EventID 3102
+        $TGTLifetimeHours  = $TGTLifeTimeHoursMin
+    } elseif ($TGTLifetimeHours -gt $TGTLifetimeHoursMax) {
+        Write-Log "The TGTLifeTimeHours exceed the maximum value of $TGTLifeTimeHoursMax." -Severity Warning -EventID 3103
+        $TGTLifeTimeHours = $TGTLifeTimeHoursMax
+    }
+    #endregion
+    #region validate user
+    if (!(Get-ADuser -Filter {SamAccountName -eq $RollOverADAccountName})){
+        Write-Log -Message "can not find $RollOverAccountName in the current active directory domain" -Severity Error -EventID 3109
+    }
+#endregion
+#endregion
     #generate a random password for the Kerberos RollOver Account
     $secPwd = New-RandomPassword -length $passwordSize 
     
@@ -290,36 +321,39 @@ try {
     $DomainName = $matches[0] 
     $AzureADSsoAcc = Get-ADcomputer -Identity $AzureADSSOAccName -server $DomainName -Properties pwdLastSet
     $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($AzureADSsoAcc.pwdLastSet)
-    if (((Get-Date) - $AzureADSsoAccPwdLastSet).Totalhours -le $TGTLifetimeHours) {
-        Write-Log -Message "The AzureADSSOAcc last password reset at $AzureADSsoAccPwdLastSet does not exceed the current TGT lifetime of $TGTLifetimeHours hours" -Severity Warning -EventID 3107
-        Throw [System.InvalidOperationException] "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSet does not expired the TGT lifetime"
+    if ($TGTLifetimeHours -gt $TGTLifetimeHoursMin){
+        if (((Get-Date) - $AzureADSsoAccPwdLastSet).Totalhours -le $TGTLifetimeHours) {
+            Write-Log -Message "The AzureADSSOAcc last password reset at $AzureADSsoAccPwdLastSet does not exceed the current TGT lifetime of $TGTLifetimeHours hours" -Severity Warning -EventID 3107
+            Throw [System.InvalidOperationException] "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSet does not expired the TGT lifetime"
+        }
     }
     
     # Reset the Kerberos RollOver Account Password
     Set-ADAccountPassword -Identity $RollOverADAccountName -NewPassword $secPwd -Reset 
     Write-Log -Message "Reset Password for Kerberos RollOver Account: $RollOverADAccountName" -Severity Information -EventID 3001
-    Write-Log -Message "wait for replication to complete..." -Severity Debug -EventID 0
     if (!$DoNotStartSync) {
         # Start the Azure AD Sync to sync the new password to Azure AD
-        Start-ADSyncSyncCycle -PolicyType Delta 
         Write-Log -Message "Started Azure AD Sync" -Severity Information -EventID 3002
+        Start-ADSyncSyncCycle -PolicyType Delta 
     } else {
         Write-Log -Message "Skip starting the Azure AD Sync" -Severity Debug -EventID 0
     }
     #wating for the sync to complete
+    Write-Log -Message "wait for replication to complete..." -Severity Debug -EventID 0
     Start-Sleep -Seconds $AzureSyncWaitTime
 
     
     #region connect to Azure AD with the Kerberos RollOver Account
     [pscredential]$CredKerbRollOverCred = New-Object System.Management.Automation.PSCredential ("$((Get-ADDomain).NetBIOSName)\$RollOverADAccountName", $secPwd)
     [pscredential]$CredKerbRollOverAzCred = New-Object System.Management.Automation.PSCredential ($RollOverAccountUPN, $secPwd)
+    Write-Log -Message "Connect to Azure AD with Kerberos RollOver Account $RollOverAccountUPN" -Severity Debug -EventID 0
     New-AzureADSSOAuthenticationContext -CloudCredentials $CredKerbRollOverAzCred
-    Write-Log -Message "Successfully $RollOverAccountUPN authenticated to Azure AD" -Severity Information -EventID 3002
+    Write-Log -Message "Successfully $RollOverAccountUPN authenticated to Azure AD" -Severity Information -EventID 3003
     #endregion
 
     #Update the Azure AD SSO Forest with the new Kerberos RollOver Account Password
     Update-AzureADSSOForest -OnPremCredentials $CredKerbRollOverCred -PreserveCustomPermissionsOnDesktopSsoAccount 
-    Write-Log -Message "Updated Azure AD SSO Forest with new Kerberos RollOver Account Password" -Severity Information -EventID 3003
+    Write-Log -Message "Updated Azure AD SSO Forest with new Kerberos RollOver Account Password" -Severity Information -EventID 3004
 } 
 catch [System.InvalidOperationException] {
     Write-Log -Message "Invalid operation $($_)" -Severity Debug -EventID 0
