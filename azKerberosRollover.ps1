@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 0.1.20250509
+.VERSION 0.1.20251007
 
 .GUID 2efdf5d8-370e-425c-afad-e5951a84f893
 
@@ -68,6 +68,10 @@ Version 0.1.20251006
     If unsupported parameter values are used the script will now use the default values
     if the tgtlifetime is set to 0 the AzureADSSO check is skipped
     New event IDs for better error handling added. see EventID.md for details
+Version 0.1.20251007
+    Added more error handling and logging
+    
+
     
 
 .SYNOPSIS
@@ -260,6 +264,8 @@ Write-Log "=========================================" -Severity Debug -EventID 0
 Write-Log "Script version $ScriptVersion running as $($env:USERNAME) Debug log: $LogFile" -Severity Information -EventID 3000
 Write-Log -Message "The script started with $($MyInvocation.Line) - Process ID $($PID)" -Severity Debug -EventID 0
 Write-Log -Message "Current user $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Severity Debug -EventID 0 
+Write-Log -Message "Parameters: AzureADSSOModule: $AzureADSSOModule, RollOverADAccountName: $RollOverADAccountName, RollOverAccountUPN: $RollOverAccountUPN, LogPath: $LogPath, AzureSyncWaitTime: $AzureSyncWaitTime, DoNotStartSync: $DoNotStartSync, TGTLifetimeHours: $TGTLifetimeHours" -Severity Debug -EventID 0
+
 
 try {
     #region Import the required modules
@@ -299,17 +305,20 @@ try {
     #endregion
     #region validate user
     if (!(Get-ADuser -Filter {SamAccountName -eq $RollOverADAccountName})){
-        Write-Log -Message "can not find $RollOverAccountName in the current active directory domain" -Severity Error -EventID 3109
+        Write-Log -Message "can not find $RollOverADAccountName in the current active directory domain" -Severity Error -EventID 3109
+        throw [System.ArgumentException] "The Kerberos RollOver Account $RollOverADAccountName does not exist in the current active directory domain"
     }
 #endregion
 #endregion
     #generate a random password for the Kerberos RollOver Account
+    Write-Log -Message "Generate a new random password for the Kerberos RollOver Account" -Severity Debug -EventID 0
     $secPwd = New-RandomPassword -length $passwordSize 
     
     #if the UPN match to the active directory UPN read the UPN from the AD account
     if (!$RollOverAccountUPN) {
         $RollOverAccountUPN = (get-ADuser $RollOverADAccountName).UserPrincipalName
     }
+    write-Log -Message "Using $RollOverAccountUPN as UPN for the Kerberos RollOver Account" -Severity Debug -EventID 0
     $GlobalCatalogServer = (Get-ADDomainController -Discover -Service GlobalCatalog).Name
     $AzureADSsoAcc = Get-ADComputer -Filter {Name -eq $AzureADSSOAccName } -Server $GlobalCatalogServer -Properties CanonicalName
     if (!$AzureADSsoAcc) {
@@ -321,10 +330,11 @@ try {
     $DomainName = $matches[0] 
     $AzureADSsoAcc = Get-ADcomputer -Identity $AzureADSSOAccName -server $DomainName -Properties pwdLastSet
     $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($AzureADSsoAcc.pwdLastSet)
+    Write-Log -Message "The AzureADSSOAcc computer account was last password reset at $AzureADSsoAccPwdLastSet" -Severity Debug -EventID 0
     if ($TGTLifetimeHours -gt $TGTLifetimeHoursMin){
         if (((Get-Date) - $AzureADSsoAccPwdLastSet).Totalhours -le $TGTLifetimeHours) {
             Write-Log -Message "The AzureADSSOAcc last password reset at $AzureADSsoAccPwdLastSet does not exceed the current TGT lifetime of $TGTLifetimeHours hours" -Severity Warning -EventID 3107
-            Throw [System.InvalidOperationException] "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSet does not expired the TGT lifetime"
+            throw -EntryType System.InvalidOperationException "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSet does not expired the TGT lifetime" 
         }
     }
     
@@ -355,46 +365,58 @@ try {
     Update-AzureADSSOForest -OnPremCredentials $CredKerbRollOverCred -PreserveCustomPermissionsOnDesktopSsoAccount 
     Write-Log -Message "Updated Azure AD SSO Forest with new Kerberos RollOver Account Password" -Severity Information -EventID 3004
 } 
-catch [System.InvalidOperationException] {
-    Write-Log -Message "Invalid operation $($_)" -Severity Debug -EventID 0
-} 
-catch [System.IO.FileNotFoundException] {
-    if ($Error[0].CategoryInfo.TargetName -like "*AzureADSSO.psd1"){
-        Write-log -Message "$($Error[0].CategoryInfo.TargetName) Take care the script is running on a Microsoft Entra Connect server" -Severity Error -EventID 3100
-    } else {
-        Write-log -Message "$($Error[0].CategoryInfo.TargetName) Please install the required PowerShell modules" -Severity Error -EventID 3101
-    }
-} 
-catch [System.AccessViolationException] {
-    Write-log -Message "Access denied error occured while resetting the password for the Kerberos RollOver Account. Please ensure you have the necessary permissions." -Severity Error -EventID 3102
-}
-catch [Microsoft.Identity.Client.MsalException] {
-    switch ($Error[0].CategoryInfo.Reason) {
-        "AdalException" {
-            Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3103
-            break
-          }
-        "AdalUserInteractionRequiredException" {
-            Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3104
-            break
+catch{
+    Write-Log -Message "An error occurred: $($_.InvocationInfo.PositionMessage)" -Severity Debug -EventID 0
+    switch ($_.Exception){
+        {$_ -is [System.InvalidOperationException]}{
+            Write-Log -Message "Invalid operation $($_)" -Severity Debug -EventID 0
         }
-        "MsalClientException"{
-            Write-Log -Message "Password Error enforced for $RollOverAccountUPN" -Severity Error -EventID 3105
-            break
+        {$_ -is [System.IO.FileNotFoundException]}{
+            if ($Error[0].CategoryInfo.TargetName -like "*AzureADSSO.psd1"){
+                Write-log -Message "$($Error[0].CategoryInfo.TargetName) Take care the script is running on a Microsoft Entra Connect server" -Severity Error -EventID 3100
+            } else {
+                Write-log -Message "$($Error[0].CategoryInfo.TargetName) Please install the required PowerShell modules" -Severity Error -EventID 3101
+            }
+        }
+        {$_ -is [System.AccessViolationException]}{
+            Write-log -Message "Access denied error occured while resetting the password for the Kerberos RollOver Account. Please ensure you have the necessary permissions." -Severity Error -EventID 3102
+        }
+        {$_ -is [Microsoft.Identity.Client.MsalException]}{
+            switch ($Error[0].CategoryInfo.Reason) {
+                "AdalException" {
+                    Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3103
+                    break
+                }
+                "AdalUserInteractionRequiredException" {
+                    Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3104
+                    break
+                }
+                "MsalClientException" {
+                    Write-Log -Message "Password Error enforced for $RollOverAccountUPN" -Severity Error -EventID 3105
+                    break
+                }
+                Default {
+                    Write-Log -Message "An error occurred: $_" -Severity Error -EventID 3198
+                    break
+                }
+            }
+        }
+        {$_ -is [System.ArgumentException]}{
+            Write-Log -Message "Invalid argument: $($_)" -Severity Debug -EventID 0
+        }
+        {$_ -is [System.Management.Automation.CommandNotFoundException]}{
+            Write-Log -Message "A required PowerShell command is missing. Please ensure the required PowerShell modules are installed." -Severity Error -EventID 3110
         }
         Default {
-            Write-Log -Message "An error occurred: $_" -Severity Error -EventID 3198
-            break   
+            Write-Log -Message "An error occurred: $_" -Severity Error -EventID 3199
         }
-    }
-    Write-Log -Message $Error[0].Exception -Severity Debug -EventID 0
-}
-catch {
-    Write-Log "An error occurred: $_" -Severity Error -EventID 3199  
+    }    
 }
 finally {
     if ($Error.Count -gt 0) {
-        Write-Log -Message $Error[0].Exception -Severity Debug -EventID 0
+        Write-Log -Message "Script terminated with error: $($Error[0].Exception.Message)" -Severity Warning -EventID 3005
+    } else {
+        Write-Log -Message "Script completed successfully" -Severity Information -EventID 3006
     }
-    Write-Log "Script finished" -Severity Debug -EventID 0
+    Write-Log "=========================================" -Severity Debug -EventID 0
 }
