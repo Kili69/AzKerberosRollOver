@@ -70,6 +70,9 @@ Version 0.1.20251006
     New event IDs for better error handling added. see EventID.md for details
 Version 0.1.20251007
     Added more error handling and logging
+Version 0.1.20251014
+    The script readn the AzureADSSOAcc computer account from the global catalog and read the PwdLastSet property from the AD Object. The AzureADSSOAcc computer account can now located in a different domain then the Azure AD-Sync computer
+    Bug-fix in Error handling
     
 
     
@@ -210,7 +213,7 @@ function Write-Log {
 
 #region Script Variables
 
-$ScriptVersion = "0.1.20251006"
+$ScriptVersion = "0.1.20251014"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"
@@ -220,6 +223,7 @@ $TGTLifetimeHoursMin = 0
 $TGTLifetimeHoursMax = 24
 [int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$GlobalCatalogPort = 3268
 $AzureADSSOAccName = "AzureADSSOAcc"
 #endregion
 
@@ -296,10 +300,10 @@ try {
     #endregion 
     #region validate the TGT lifetime hours
     if ($TGTLifetimeHours -lt $TGTLifetimeHoursMin){
-        Write-Log "The TGTLifeTime parameter is lower then $TGTLifeTimeHoursMin. Using $TGTLifeTimeHoursMin" -Severity Warning -EventID 3102
+        Write-Log "The TGTLifeTime parameter is lower then $TGTLifeTimeHoursMin. Using $TGTLifeTimeHoursMin" -Severity Warning -EventID 3112
         $TGTLifetimeHours  = $TGTLifeTimeHoursMin
     } elseif ($TGTLifetimeHours -gt $TGTLifetimeHoursMax) {
-        Write-Log "The TGTLifeTimeHours exceed the maximum value of $TGTLifeTimeHoursMax." -Severity Warning -EventID 3103
+        Write-Log "The TGTLifeTimeHours exceed the maximum value of $TGTLifeTimeHoursMax." -Severity Warning -EventID 3113
         $TGTLifeTimeHours = $TGTLifeTimeHoursMax
     }
     #endregion
@@ -319,16 +323,17 @@ try {
         $RollOverAccountUPN = (get-ADuser $RollOverADAccountName).UserPrincipalName
     }
     write-Log -Message "Using $RollOverAccountUPN as UPN for the Kerberos RollOver Account" -Severity Debug -EventID 0
-    $GlobalCatalogServer = (Get-ADDomainController -Discover -Service GlobalCatalog).Name
-    $AzureADSsoAcc = Get-ADComputer -Filter {Name -eq $AzureADSSOAccName } -Server $GlobalCatalogServer -Properties CanonicalName
-    if (!$AzureADSsoAcc) {
+    $GlobalCatalogServer = '{0}:{1}' -f (Get-ADDomainController -Discover -Service GlobalCatalog).HostName.Value, $GlobalCatalogPort
+    write-Log -Message "Using $GlobalCatalogServer as Global Catalog server" -Severity Debug -EventID 0
+    $gcAzureADSsoAcc = Get-ADComputer -Filter {Name -eq $AzureADSSOAccName } -Server "$GlobalCatalogServer" -Properties CanonicalName
+    if (!$gcAzureADSsoAcc) {
         Write-Log -Message "AzureADSSOAcc computer account not found in the Global Catalog. Please ensure the Azure AD Connect is installed and configured." -Severity Error -EventID 3106
-        return 0x3EA
+        throw [System.ArgumentException] "The AzureADSSOAcc computer account was not found in the Global Catalog"
     }
     #extracting domain name from the AzureADSSOAcc computer account
-    $AzureADSsoAcc.CanonicalName -match "[^/]+" |Out-Null
+    $gcAzureADSsoAcc.CanonicalName -match "[^/]+" |Out-Null
     $DomainName = $matches[0] 
-    $AzureADSsoAcc = Get-ADcomputer -Identity $AzureADSSOAccName -server $DomainName -Properties pwdLastSet
+    $AzureADSsoAcc = Get-ADcomputer -Filter {Name -eq $AzureADSSOAccName} -server $DomainName -Properties pwdLastSet
     $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($AzureADSsoAcc.pwdLastSet)
     Write-Log -Message "The AzureADSSOAcc computer account was last password reset at $AzureADSsoAccPwdLastSet" -Severity Debug -EventID 0
     if ($TGTLifetimeHours -gt $TGTLifetimeHoursMin){
@@ -366,20 +371,23 @@ try {
     Write-Log -Message "Updated Azure AD SSO Forest with new Kerberos RollOver Account Password" -Severity Information -EventID 3004
 } 
 catch{
-    Write-Log -Message "An error occurred: $($_.InvocationInfo.PositionMessage)" -Severity Debug -EventID 0
+    Write-Log -Message "An error occurred:$($_.Exception.Message) $($_.InvocationInfo.PositionMessage)" -Severity Debug -EventID 0
     switch ($_.Exception){
         {$_ -is [System.InvalidOperationException]}{
             Write-Log -Message "Invalid operation $($_)" -Severity Debug -EventID 0
+            break
         }
         {$_ -is [System.IO.FileNotFoundException]}{
             if ($Error[0].CategoryInfo.TargetName -like "*AzureADSSO.psd1"){
-                Write-log -Message "$($Error[0].CategoryInfo.TargetName) Take care the script is running on a Microsoft Entra Connect server" -Severity Error -EventID 3100
+                Write-log -Message "Take care the script is running on a Microsoft Entra Connect server. Missing $($Error[0].CategoryInfo.TargetName) " -Severity Error -EventID 3111
             } else {
-                Write-log -Message "$($Error[0].CategoryInfo.TargetName) Please install the required PowerShell modules" -Severity Error -EventID 3101
+                Write-log -Message "Please install the required PowerShell modules $($Error[0].CategoryInfo.TargetName) " -Severity Error -EventID 3111
             }
+            break
         }
         {$_ -is [System.AccessViolationException]}{
             Write-log -Message "Access denied error occured while resetting the password for the Kerberos RollOver Account. Please ensure you have the necessary permissions." -Severity Error -EventID 3102
+            break
         }
         {$_ -is [Microsoft.Identity.Client.MsalException]}{
             switch ($Error[0].CategoryInfo.Reason) {
@@ -400,12 +408,15 @@ catch{
                     break
                 }
             }
+            break
         }
         {$_ -is [System.ArgumentException]}{
-            Write-Log -Message "Invalid argument: $($_)" -Severity Debug -EventID 0
+            Write-Log -Message "Invalid argument: $($_)" -Severity Error -EventID 3110
+            break
         }
         {$_ -is [System.Management.Automation.CommandNotFoundException]}{
             Write-Log -Message "A required PowerShell command is missing. Please ensure the required PowerShell modules are installed." -Severity Error -EventID 3110
+            break
         }
         Default {
             Write-Log -Message "An error occurred: $_" -Severity Error -EventID 3199
@@ -414,7 +425,7 @@ catch{
 }
 finally {
     if ($Error.Count -gt 0) {
-        Write-Log -Message "Script terminated with error: $($Error[0].Exception.Message)" -Severity Warning -EventID 3005
+        Write-Log -Message "Script terminated with error: $($Error[0].Exception.Message)" -Severity Warning -EventID 3196
     } else {
         Write-Log -Message "Script completed successfully" -Severity Information -EventID 3006
     }
