@@ -10,6 +10,7 @@ This script writes events t the application log and to the Debuglog File. The fo
 |3004    | Information | Successfully update the Azure Kerberos object                          |
 |3005    | Warning     | Script terminated with error                                           |
 |3006    | Information | Script finished successfully                                           |
+|3007    | Information | Impersonation account information                                      |
 |3100    | Warning     | The Azure Sync wait time is to low change to minimum value             |
 |3101    | Warning     | The Azure Sync wait time it to high change to maximum value            |
 |3102    | Error       | A permission error occured while resetting the password                |

@@ -149,10 +149,13 @@ function New-RandomPassword {
     $chars += [char[]](65..90)  # Uppercase A-Z
     $chars += [char[]](97..122) # Lowercase a-z
     $chars += [char[]](48..57)  # Numbers 0-9
-    $chars += [char[]](33..47)  # Special characters ! " # $ % & ' ( ) * + , - . /
+    $chars += [char[]](33)      # Special characters !
+    $chars += [char[]](35..38)  # Special characters # $ % & ' ( ) * + , - . /
+    $chars += [char[]](40..47)  # Special characters : ; < = > ? @
+
 
     $password = -join ((1..$length) | ForEach-Object { $chars | Get-Random })
-    return ConvertTo-SecureString -String $password -AsPlainText -Force
+    return $password
 }
 <#
 .SYNOPSIS
@@ -192,6 +195,7 @@ function Write-Log {
 
     #Format the log message and write it to the log file
     $LogLine = "$(Get-Date -Format o),$($PID), [$Severity],[$EventID], $Message"
+    Write-Debug -Message $LogLine
     Add-Content -Path $LogFile -Value $LogLine -Force
     #If the severity is not debug write the even to the event log and format the output
     switch ($Severity) {
@@ -213,7 +217,7 @@ function Write-Log {
 
 #region Script Variables
 
-$ScriptVersion = "0.1.20251014"
+$ScriptVersion = "0.1.20251107"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"
@@ -233,9 +237,9 @@ $AzureADSSOAccName = "AzureADSSOAcc"
 
 #region Manage log file
 try {   
-
     # Check if the source exists; if not, create it
     if (-not [System.Diagnostics.EventLog]::SourceExists($source)) {
+        Write-Debug "Creating event source $source in log $eventLog"
         [System.Diagnostics.EventLog]::CreateEventSource($source, $eventLog)
     }
 }
@@ -247,17 +251,24 @@ catch {
 if ($LogPath -eq ""){
     $LogPath = $env:LOCALAPPDATA
 } else {
-    if (!Test-Path $LogPath){
+    if (!(Test-Path $LogPath)){
         $LogPath = $env:LOCALAPPDATA
+    } else {
+        # Check if LogPath is a file, if so extract only the directory part
+        if (Test-Path $LogPath -PathType Leaf){
+            $LogPath = Split-Path $LogPath -Parent
+        }
     }
 }
 $LogFile = "$LogPath\$(if($psise) {[System.IO.Path]::GetFileNameWithoutExtension($psise.CurrentFile.FullPath)} else {$MyInvocation.MyCommand}).log"
+Write-Debug "Using $LogFile as log file"
 
 #Manage the log file size. If the log file is larger than 1MB, rename it to .sav and create a new log file
 if (Test-Path $LogFile){
     if ((Get-Item $LogFile ).Length -gt $MaxLogFileSize){
         if (Test-Path "$LogFile.sav"){
             Remove-Item "$LogFile.sav"
+            Write-Debug "Removed old log file $LogFile.sav"
         }
         Rename-Item -Path $LogFile -NewName "$logFile.sav"
     }
@@ -271,7 +282,7 @@ Write-Log -Message "Current user $([System.Security.Principal.WindowsIdentity]::
 Write-Log -Message "Parameters: AzureADSSOModule: $AzureADSSOModule, RollOverADAccountName: $RollOverADAccountName, RollOverAccountUPN: $RollOverAccountUPN, LogPath: $LogPath, AzureSyncWaitTime: $AzureSyncWaitTime, DoNotStartSync: $DoNotStartSync, TGTLifetimeHours: $TGTLifetimeHours" -Severity Debug -EventID 0
 
 
-try {
+Try {
     #region Import the required modules
     if (!(Get-Module -Name AzureADSSO)){
         Import-Module $AzureADSSOModule -Force -ErrorAction Stop
@@ -314,9 +325,7 @@ try {
     }
 #endregion
 #endregion
-    #generate a random password for the Kerberos RollOver Account
-    Write-Log -Message "Generate a new random password for the Kerberos RollOver Account" -Severity Debug -EventID 0
-    $secPwd = New-RandomPassword -length $passwordSize 
+
     
     #if the UPN match to the active directory UPN read the UPN from the AD account
     if (!$RollOverAccountUPN) {
@@ -339,12 +348,19 @@ try {
     if ($TGTLifetimeHours -gt $TGTLifetimeHoursMin){
         if (((Get-Date) - $AzureADSsoAccPwdLastSet).Totalhours -le $TGTLifetimeHours) {
             Write-Log -Message "The AzureADSSOAcc last password reset at $AzureADSsoAccPwdLastSet does not exceed the current TGT lifetime of $TGTLifetimeHours hours" -Severity Warning -EventID 3107
-            throw -EntryType System.InvalidOperationException "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSet does not expired the TGT lifetime" 
+            throw [System.InvalidOperationException] "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSet does not expired the TGT lifetime"
         }
     }
     
     # Reset the Kerberos RollOver Account Password
-    Set-ADAccountPassword -Identity $RollOverADAccountName -NewPassword $secPwd -Reset 
+        #generate a random password for the Kerberos RollOver Account
+    Write-Log -Message "Generate a new random password for the Kerberos RollOver Account" -Severity Debug -EventID 0
+    $secPwd = New-RandomPassword -length $passwordSize 
+    Set-ADAccountPassword -Identity $RollOverADAccountName -NewPassword (ConvertTo-SecureString $secPwd -AsPlainText -Force) -Reset -ErrorAction Stop
+    Write-Log -Message "Password for Kerberos RollOver Account $RollOverADAccountName has been reset" -Severity Debug -EventID 0
+    $DomainNetBiosName = (Get-ADDomain).NetBiosName
+    $ADUser = "$DomainNetBiosName\$RollOverADAccountName"
+    [pscredential]$AdCredential = New-Object System.Management.Automation.PSCredential ($ADuser, (ConvertTo-SecureString $secPwd -AsPlainText -Force))
     Write-Log -Message "Reset Password for Kerberos RollOver Account: $RollOverADAccountName" -Severity Information -EventID 3001
     if (!$DoNotStartSync) {
         # Start the Azure AD Sync to sync the new password to Azure AD
@@ -359,16 +375,23 @@ try {
 
     
     #region connect to Azure AD with the Kerberos RollOver Account
-    [pscredential]$CredKerbRollOverCred = New-Object System.Management.Automation.PSCredential ("$((Get-ADDomain).NetBIOSName)\$RollOverADAccountName", $secPwd)
-    [pscredential]$CredKerbRollOverAzCred = New-Object System.Management.Automation.PSCredential ($RollOverAccountUPN, $secPwd)
-    Write-Log -Message "Connect to Azure AD with Kerberos RollOver Account $RollOverAccountUPN" -Severity Debug -EventID 0
-    New-AzureADSSOAuthenticationContext -CloudCredentials $CredKerbRollOverAzCred
-    Write-Log -Message "Successfully $RollOverAccountUPN authenticated to Azure AD" -Severity Information -EventID 3003
+    $rollOverTask = @"
+            Import-Module \"$AzureADSSOModule\" -erroraction stop -verbose;
+            `$secAzPwd = ConvertTo-SecureString -String \"$secPwd\" -AsPlainText -Force -Verbose
+            [pscredential]`$CredKerbRollOverAzCred = New-Object System.Management.Automation.PSCredential (\"$RollOverAccountUPN\", `$secAzPwd);
+            [pscredential]`$CredKerbRollOverADCred = New-Object System.Management.Automation.PSCredential (\"$ADUser\", `$secAzPwd);
+            New-AzureADSSOAuthenticationContext -CloudCredentials `$CredKerbRollOverAzCred -Verbose;
+            `$result = Update-AzureADSSOForest -PreserveCustomPermissionsOnDesktopSsoAccount -OnPremCredentials `$CredKerbRollOverADCred | out-string
+"@
+[pscredential]$AdCredential = New-object System.Management.Automation.PSCredential($ADUser,(ConvertTo-SecureString $secPwd -AsPlainText -Force))
+Write-Log -Message "Impersonating user $ADUser to update the Azure Kerberos object" -Severity Debug -EventID 0
+Start-Process -FilePath powershell.exe -Credential $AdCredential -ArgumentList @(
+    "-NoProfile",
+    "-Command &{$RollOverTask}"
+)
     #endregion
 
-    #Update the Azure AD SSO Forest with the new Kerberos RollOver Account Password
-    Update-AzureADSSOForest -OnPremCredentials $CredKerbRollOverCred -PreserveCustomPermissionsOnDesktopSsoAccount 
-    Write-Log -Message "Updated Azure AD SSO Forest with new Kerberos RollOver Account Password" -Severity Information -EventID 3004
+    Write-Log -Message "Successfully updated the Azure Kerberos object" -Severity Information -EventID 3004
 } 
 catch{
     Write-Log -Message "An error occurred:$($_.Exception.Message) $($_.InvocationInfo.PositionMessage)" -Severity Debug -EventID 0
@@ -389,29 +412,12 @@ catch{
             Write-log -Message "Access denied error occured while resetting the password for the Kerberos RollOver Account. Please ensure you have the necessary permissions." -Severity Error -EventID 3102
             break
         }
-        {$_ -is [Microsoft.Identity.Client.MsalException]}{
-            switch ($Error[0].CategoryInfo.Reason) {
-                "AdalException" {
-                    Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3103
-                    break
-                }
-                "AdalUserInteractionRequiredException" {
-                    Write-Log -Message "Multifactor Authentication enforced for $RollOverAccountUPN" -Severity Error -EventID 3104
-                    break
-                }
-                "MsalClientException" {
-                    Write-Log -Message "Password Error enforced for $RollOverAccountUPN" -Severity Error -EventID 3105
-                    break
-                }
-                Default {
-                    Write-Log -Message "An error occurred: $_" -Severity Error -EventID 3198
-                    break
-                }
-            }
-            break
-        }
         {$_ -is [System.ArgumentException]}{
             Write-Log -Message "Invalid argument: $($_)" -Severity Error -EventID 3110
+            break
+        }
+        {$_ -is [System.InvalidOperationException]}{
+            Write-Log -Message "A Invalid operation error occurred: $($_)" -Severity Error -EventID 3198
             break
         }
         {$_ -is [System.Management.Automation.CommandNotFoundException]}{
