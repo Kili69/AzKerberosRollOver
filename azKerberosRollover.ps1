@@ -76,10 +76,10 @@ Version 0.1.20251014
 Version 0.1.20251107
     The update of the Kerberos SSO object is now executed in a new PowerShell process running under the Kerberos RollOver Account context. This should fix issues if the user is restricted with conditional access policies. 
     If the script is executed as system, the device id will not provide the Azure device information. With the impersonation of the Rollover account the azure login will provide the device ID. Within this information the account can be restricted to a single device.
-    The mitigate the risk,  
-    
-
-    
+Version 0.1.20251108
+    Minor documentation fix   
+Version 0.1.20251110 
+    New parameter IgnoreTGTLifetimeCheck to skip the TGT lifetime check. The reset of the Kerberos RollOver Account password will be performed even if the AzureADSSOAcc password last set is within the TGT lifetime.
 
 .SYNOPSIS
     This script resets the password of the Kerberos RollOver Account and updates the Azure AD SSO Forest with the new password.
@@ -106,6 +106,8 @@ Version 0.1.20251107
     If this switch is set, the script will not start the Azure AD Sync after resetting the password. The default is to start the sync automatically after resetting the password. This is useful if the account is synchronizes via Azure cloud-Sync
 .PARAMETER TGTLifetimeHours
     The lifetime of the Kerberos Ticket Granting Ticket (TGT) in hours. Default is 10 hours. The value must be between 1 and 23 hours.
+.PARAMETER IgnoreTGTLifetimeCheck
+    If this switch is set, the script will skip the TGT lifetime check and reset the password of the Kerberos RollOver Account even if the AzureADSSOAcc password last set is within the TGT lifetime.
     #>
 param(
     [Parameter(Mandatory=$false)]
@@ -120,7 +122,8 @@ param(
     [int]$AzureSyncWaitTime = 60,
     [switch]$DoNotStartSync,
     [Parameter (Mandatory=$false)]
-    [int]$TGTLifetimeHours = 10
+    [int]$TGTLifetimeHours = 10,
+    [switch]$IgnoreTGTLifetimeCheck
 )
 <#
 .SYNOPSIS
@@ -221,7 +224,7 @@ function Write-Log {
 
 #region Script Variables
 
-$ScriptVersion = "0.1.20251107"
+$ScriptVersion = "0.1.20251110"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"
@@ -349,7 +352,9 @@ Try {
     $AzureADSsoAcc = Get-ADcomputer -Filter {Name -eq $AzureADSSOAccName} -server $DomainName -Properties pwdLastSet
     $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($AzureADSsoAcc.pwdLastSet)
     Write-Log -Message "The AzureADSSOAcc computer account was last password reset at $AzureADSsoAccPwdLastSet" -Severity Debug -EventID 0
-    if ($TGTLifetimeHours -gt $TGTLifetimeHoursMin){
+    if ($IgnoreTGTLifetimeCheck){
+        Write-Log -Message "Skipping the TGT lifetime check as the IgnoreTGTLifetimeCheck switch is set" -Severity Warning -EventID 3008
+    } else {
         if (((Get-Date) - $AzureADSsoAccPwdLastSet).Totalhours -le $TGTLifetimeHours) {
             Write-Log -Message "The AzureADSSOAcc last password reset at $AzureADSsoAccPwdLastSet does not exceed the current TGT lifetime of $TGTLifetimeHours hours" -Severity Warning -EventID 3107
             throw [System.InvalidOperationException] "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSet does not expired the TGT lifetime"
