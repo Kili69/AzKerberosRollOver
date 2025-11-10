@@ -73,6 +73,10 @@ Version 0.1.20251007
 Version 0.1.20251014
     The script readn the AzureADSSOAcc computer account from the global catalog and read the PwdLastSet property from the AD Object. The AzureADSSOAcc computer account can now located in a different domain then the Azure AD-Sync computer
     Bug-fix in Error handling
+Version 0.1.20251107
+    The update of the Kerberos SSO object is now executed in a new PowerShell process running under the Kerberos RollOver Account context. This should fix issues if the user is restricted with conditional access policies. 
+    If the script is executed as system, the device id will not provide the Azure device information. With the impersonation of the Rollover account the azure login will provide the device ID. Within this information the account can be restricted to a single device.
+    The mitigate the risk,  
     
 
     
