@@ -379,27 +379,66 @@ Try {
         Write-Log -Message "Skip starting the Azure AD Sync" -Severity Debug -EventID 0
     }
     #wating for the sync to complete
-    Write-Log -Message "wait for replication to complete..." -Severity Debug -EventID 0
+    Write-Log -Message "wait $AzureSyncWaitTime secondes for replication to complete..." -Severity Debug -EventID 0
     Start-Sleep -Seconds $AzureSyncWaitTime
+    #create temporary file for the new PowerShell process
+    $PSShellTempFile = New-TemporaryFile
+    #allow $ADUser write access to the temporary file
+    $acl = Get-Acl -Path $PSShellTempFile.FullName
+    $acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($ADUser, "FullControl", "Allow")))
+    Set-Acl -Path $PSShellTempFile.FullName -AclObject $acl
 
-    
     #region connect to Azure AD with the Kerberos RollOver Account
     $rollOverTask = @"
-            Import-Module \"$AzureADSSOModule\" -erroraction stop -verbose;
-            `$secAzPwd = ConvertTo-SecureString -String \"$secPwd\" -AsPlainText -Force -Verbose
-            [pscredential]`$CredKerbRollOverAzCred = New-Object System.Management.Automation.PSCredential (\"$RollOverAccountUPN\", `$secAzPwd);
-            [pscredential]`$CredKerbRollOverADCred = New-Object System.Management.Automation.PSCredential (\"$ADUser\", `$secAzPwd);
-            New-AzureADSSOAuthenticationContext -CloudCredentials `$CredKerbRollOverAzCred -Verbose;
-            `$result = Update-AzureADSSOForest -PreserveCustomPermissionsOnDesktopSsoAccount -OnPremCredentials `$CredKerbRollOverADCred | out-string
+            Write-host \"Starting AzureADSSO Forest update...\"
+            #Import-Module \"$AzureADSSOModule\" -erroraction stop -verbose 
+            #`$secAzPwd = ConvertTo-SecureString -String \"$secPwd\" -AsPlainText -Force -Verbose
+            #[pscredential]`$CredKerbRollOverAzCred = New-Object System.Management.Automation.PSCredential (\"$RollOverAccountUPN\", `$secAzPwd);
+            #[pscredential]`$CredKerbRollOverADCred = New-Object System.Management.Automation.PSCredential (\"$ADUser\", `$secAzPwd);
+            #New-AzureADSSOAuthenticationContext -CloudCredentials `$CredKerbRollOverAzCred -Verbose 
+            #Update-AzureADSSOForest -PreserveCustomPermissionsOnDesktopSsoAccount -OnPremCredentials `$CredKerbRollOverADCred -Verbose 
 "@
 [pscredential]$AdCredential = New-object System.Management.Automation.PSCredential($ADUser,(ConvertTo-SecureString $secPwd -AsPlainText -Force))
 Write-Log -Message "Impersonating user $ADUser to update the Azure Kerberos object" -Severity Debug -EventID 0
-Start-Process -FilePath powershell.exe -Credential $AdCredential -ArgumentList @(
-    "-NoProfile",
-    "-Command &{$RollOverTask}"
-)
-    #endregion
+$ADSSResetJob = Start-Job -Credential $AdCredential -ScriptBlock {
+    param ($AzureADSSOModule, $RollOverAccountUPN, $ADUser, $secPwd)
+    Import-Module $AzureADSSOModule -erroraction stop -verbose 
+    $secAzPwd = ConvertTo-SecureString -String $secPwd -AsPlainText -Force -Verbose
+    [pscredential]$CredKerbRollOverAzCred = New-Object System.Management.Automation.PSCredential ($RollOverAccountUPN, $secAzPwd);
+    [pscredential]$CredKerbRollOverADCred = New-Object System.Management.Automation.PSCredential ($ADUser, $secAzPwd);
+    $context = New-AzureADSSOAuthenticationContext -CloudCredentials $CredKerbRollOverAzCred -Verbose 
+    $update = Update-AzureADSSOForest -PreserveCustomPermissionsOnDesktopSsoAccount -OnPremCredentials $CredKerbRollOverADCred -Verbose 
+    Write-Output $context, $update
+} -ArgumentList $AzureADSSOModule, $RollOverAccountUPN, $ADUser, $secPwd 
+Write-Log -Message "Waiting for AzureADSSO Forest update job to complete..." -Severity Debug -EventID 0
+Wait-Job -Job $ADSSResetJob 
+Write-Log -Message "AzureADSSO Forest update job completed" -Severity Debug -EventID 0
+$JobResult = Receive-Job -Job $ADSSResetJob -Keep  
+Write-Host $JobResult -ForegroundColor Yellow
+Write-Log -Message "AzureADSSO Forest update completed" -Severity Information -EventID 3002
+$ADSSResetJob | Remove-Job
 
+    #endregion
+    #to avoid ADWS caching issues the pwdLastSet attribute will be read from the PDC emulator
+    #Get PDC emulator
+    $PDCEmulator = (Get-ADDomain).PDCEmulator
+    #Connect to PDC emulator
+    $LDAPPath = "LDAP://$PDCEmulator"
+    $Searcher = New-Object System.DirectoryServices.DirectorySearcher
+    $Searcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry($LDAPPath)
+    $Searcher.Filter = "(&(objectClass=computer)(sAMAccountName=$AzureADSSOAccName`$))"
+    $Searcher.PropertiesToLoad.Add("pwdLastSet") | Out-Null
+    #Search for the AzureADSSOAcc computer account on the PDC emulator
+    $Result = $Searcher.FindOne()
+    $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($Result.Properties.pwdlastset[0])
+    Write-Log -Message "The AzureADSSOAcc computer account was last password reset at $AzureADSsoAccPwdLastSet (read from PDC emulator $PDCEmulator)" -Severity Debug -EventID 0
+    #Verify if the password was updated within the last 15 minutes  
+    if ($AzureADSsoAccPwdLastSet -gt (Get-Date).AddMinutes(-15)) {
+        Write-Log -Message "The AzureADSSOAcc computer account password was successfully updated at $AzureADSsoAccPwdLastSet" -Severity Information -EventID 3003
+    } else {
+        Write-Log -Message "The AzureADSSOAcc computer account password was not updated. Last password set is $AzureADSsoAccPwdLastSet" -Severity Error -EventID 3108
+        throw [System.InvalidOperationException] "The AzureADSSOAcc computer account password was not updated. Last password set is $AzureADSsoAccPwdLastSet"
+    }
     Write-Log -Message "Successfully updated the Azure Kerberos object" -Severity Information -EventID 3004
 } 
 catch{
