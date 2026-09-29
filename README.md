@@ -33,3 +33,19 @@ is the directory of the debug log. The default value is the %APPDATA%\Local fold
 
 ### AzureSyncWaitTime
 is the time in seconds who long the script will wait for the password sync cycle. The default value is 60 seconds
+
+## Versioning and changelog
+
+Each commit receives a version in the format `<major>.<minor>.<yyyyMMdd>.<counter>`.
+The counter starts at `1` each day and is incremented for additional commits on the
+same day. The staged file changes are added automatically to [CHANGELOG.md](CHANGELOG.md).
+
+Enable the repository-managed Git hook once after cloning:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+The hooks cover regular and merge commits. They update both the PowerShell script
+metadata and `$ScriptVersion`, then stage the script and changelog so that both
+updates are part of the commit.
