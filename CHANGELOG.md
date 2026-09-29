@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.20260929.4] - 2026-09-29
+
+### Changed
+
+- Modified: `README.md`
+- Modified: `azKerberosRollover.ps1`
+- Added: `developer.md`
+
 ## [0.1.20260929.3] - 2026-09-29
 
 ### Changed

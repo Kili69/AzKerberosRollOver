@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 0.1.20260929.3
+.VERSION 0.1.20260929.4
 .GUID 2efdf5d8-370e-425c-afad-e5951a84f893
 
 .AUTHOR Andreas Lucas [MSFT]
@@ -16,6 +16,9 @@ Azure, Active Directory, Kerberos, RollOver, Hybrid
 
 .PROJECTURI 
 https://github.com/Kili69/AzKerberosRollOver
+
+.DESCRIPTION
+Rolls over the Microsoft Entra seamless SSO Kerberos decryption key.
 
 .ICONURI 
 
@@ -80,34 +83,89 @@ Version 0.1.20251108
 Version 0.1.20251110 
     New parameter IgnoreTGTLifetimeCheck to skip the TGT lifetime check. The reset of the Kerberos RollOver Account password will be performed even if the AzureADSSOAcc password last set is within the TGT lifetime.
 
+#>
+
+<#
 .SYNOPSIS
-    This script resets the password of the Kerberos RollOver Account and updates the Azure AD SSO Forest with the new password.
+    Rolls over the Microsoft Entra seamless SSO Kerberos decryption key.
 .DESCRIPTION
-    This script resets the password of the Kerberos RollOver Account and updates the Azure AD SSO Forest with the new password.
-    The script uses the AzureADSSO module to perform the update. The script runs as a AD user with privileges to reset the password of the Kerberos RollOver Account.
+    Resets the password of a synchronized Active Directory rollover account and uses
+    that identity to update the AzureADSSOAcc computer account through the AzureADSSO
+    module.
+
+    The script performs the following operations:
+    1. Imports the AzureADSSO, ActiveDirectory, and ADSync modules.
+    2. Validates the configured timing values and rollover account.
+    3. Locates AzureADSSOAcc through a Global Catalog and checks its pwdLastSet value.
+    4. Stops when the previous rollover is still within the configured TGT lifetime,
+       unless IgnoreTGTLifetimeCheck is specified.
+    5. Generates a new password and resets the on-premises rollover account.
+    6. Optionally starts an Entra Connect delta synchronization and waits for replication.
+    7. Runs the AzureADSSO forest update in a background job under the rollover account.
+    8. Reads pwdLastSet from the PDC emulator to verify that the update succeeded.
 
     Return codes:
     0x0    Success
-    0x3EA  Missing powershell modules
+    0x3EA  The Windows event source could not be created.
 
 .PARAMETER AzureADSSOModule
-    The path to the AzureADSSO module. Default is default location of the Azure Active Directory Modules C:\Program Files\Microsoft Azure Active Directory Connect\AzureADSSO.psd1
+    Full path to AzureADSSO.psd1. The default is the standard Microsoft Entra Connect
+    installation path under Program Files.
 .PARAMETER RollOverADAccountName
-    The Samaccount name of the of the Active Directory Kerberos RollOver Account. Default is AzKrbRollOver. This account must be synchronized to Azure AD
+    sAMAccountName of the Active Directory account used for the rollover. The account
+    must be synchronized to Microsoft Entra ID. The default is AzKrbRollOver.
 .PARAMETER RollOverAccountUPN
-    The UPN of the Kerberos RollOver Account. 
+    Microsoft Entra UPN of the rollover account. When omitted, the value is read from
+    the matching Active Directory user.
 .PARAMETER LogPath
-    The path to the log file. Default is $env:LOCALAPPDATA\$($MyInvocation.MyCommand).log. If the path does not exist, the script will use the default location.
+    Directory in which the debug log is written. A file path is reduced to its parent
+    directory. Missing or invalid paths fall back to the current user's LOCALAPPDATA.
 .PARAMETER AzureSyncWaitTime
-    The wait time in seconds for the Azure AD Sync to complete. Default is 60 seconds. The value must be between 15 and 120 seconds.
-    If the value is less than 15 seconds, the script will use the default value of 60 seconds.
+    Number of seconds to wait after starting synchronization. Values are constrained
+    to 15 through 900 seconds by the runtime validation. The default is 60 seconds.
 .PARAMETER DoNotStartSync
-    If this switch is set, the script will not start the Azure AD Sync after resetting the password. The default is to start the sync automatically after resetting the password. This is useful if the account is synchronizes via Azure cloud-Sync
+    Skips Start-ADSyncSyncCycle. Use this when synchronization is started separately,
+    for example when the account is synchronized by Microsoft Entra Cloud Sync.
 .PARAMETER TGTLifetimeHours
-    The lifetime of the Kerberos Ticket Granting Ticket (TGT) in hours. Default is 10 hours. The value must be between 1 and 23 hours.
+    Minimum age, in hours, of the current AzureADSSOAcc password before another
+    rollover is allowed. Values are constrained to 0 through 24 hours. A value of 0
+    allows an immediate rollover. The default is 10 hours.
 .PARAMETER IgnoreTGTLifetimeCheck
-    If this switch is set, the script will skip the TGT lifetime check and reset the password of the Kerberos RollOver Account even if the AzureADSSOAcc password last set is within the TGT lifetime.
-    #>
+    Bypasses the TGT lifetime safety check and forces the rollover workflow to proceed.
+.PARAMETER WhatIf
+    Validates prerequisites and reports the planned rollover without changing
+    passwords, starting synchronization, updating seamless SSO, or writing logs.
+.EXAMPLE
+    .\azKerberosRollover.ps1 -RollOverAccountUPN 'AzKrbRollOver@contoso.com'
+
+    Performs a rollover with the default account name, timing values, and log location.
+.EXAMPLE
+    .\azKerberosRollover.ps1 -RollOverADAccountName 'SvcKrbRollover' `
+        -RollOverAccountUPN 'SvcKrbRollover@contoso.com' `
+        -AzureSyncWaitTime 120 -LogPath 'C:\Logs'
+
+    Uses a custom rollover account, waits two minutes for replication, and writes the
+    debug log under C:\Logs.
+.EXAMPLE
+    .\azKerberosRollover.ps1 -DoNotStartSync -IgnoreTGTLifetimeCheck
+
+    Skips the ADSync trigger and forces the rollover regardless of the previous
+    AzureADSSOAcc password age.
+.EXAMPLE
+    .\azKerberosRollover.ps1 -RollOverAccountUPN 'AzKrbRollOver@contoso.com' -WhatIf
+
+    Validates the environment and reports the planned rollover without making changes.
+.NOTES
+    Run this script from a Microsoft Entra Connect server in Windows PowerShell with
+    permission to create an Application event source, reset the rollover account, read
+    Active Directory through the Global Catalog and PDC emulator, and update seamless SSO.
+
+    The generated password is held in process memory only and is never written to the
+    debug log.
+.LINK
+    https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-sso-faq
+#>
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [Parameter(Mandatory=$false)]
     [string]$AzureADSSOModule = "$env:ProgramFiles\Microsoft Azure Active Directory Connect\AzureADSSO.psd1",
@@ -124,27 +182,28 @@ param(
     [int]$TGTLifetimeHours = 10,
     [switch]$IgnoreTGTLifetimeCheck
 )
+
+$script:IsWhatIf = [bool]$WhatIfPreference
+
 <#
 .SYNOPSIS
-    Generate a random password of a specified length.
+    Generates a password from the character set accepted by the rollover workflow.
 .DESCRIPTION
-    This function generates a random password using uppercase letters, lowercase letters, numbers, and special characters.
-    The password is generated by selecting random characters from the specified character sets.
-    The default length of the password is 12 characters, but this can be changed by passing a different value to the length parameter.
-.PARAMETER length
-    The length of the password to be generated. The default value is 12 characters.
-    This parameter is optional and can be set to any positive integer value.
-    If not specified, the function will generate a password of 12 characters.
+    Selects each character independently with Get-Random from uppercase letters,
+    lowercase letters, digits, and the supported punctuation characters.
+.PARAMETER Length
+    Number of characters to generate. The default is 14. The main workflow requests
+    a 32-character password.
 .EXAMPLE
-    New-RandomPassword -length 16
-    This command generates a random password of 16 characters.
+    New-RandomPassword -Length 32
+
+    Generates the password length used by the rollover workflow.
 .EXAMPLE
     New-RandomPassword
-    This command generates a random password of the default length (12 characters).
+
+    Generates a 14-character password.
 .OUTPUTS
-    A string representing the generated random password.
-    The password will contain a mix of uppercase letters, lowercase letters, numbers, and special characters.
-    The length of the password will be determined by the length parameter.
+    System.String
 #>
 function New-RandomPassword {
     param (
@@ -165,24 +224,23 @@ function New-RandomPassword {
 }
 <#
 .SYNOPSIS
-    Write event to the event log and the debug log file
+    Writes a consistently formatted diagnostic record.
 .DESCRIPTION
-    This function will write all events to the log file. If the severity is debug the message will only be written to the debug log file
-    This function replaced the write-eventlog and write-host cmdlets in this script
+    Writes every message to the debug log and debug stream. Information, warning, and
+    error records are also written to the Application event log and displayed in the
+    console. Debug records are intentionally file-only.
+.PARAMETER Message
+    Text written to the diagnostic destinations.
+.PARAMETER Severity
+    Severity of the record: Debug, Information, Warning, or Error.
+.PARAMETER EventID
+    Numeric Application event log identifier. Debug records conventionally use 0.
+.EXAMPLE
+    Write-Log -Message 'Rollover completed' -Severity Information -EventID 3004
+
+    Writes the message to the debug log, Application event log, and console.
 .OUTPUTS
     None
-.FUNCTIONALITY
-    Write event to the log file and event log
-.PARAMETER Message
-    Is the message body of the event
-.PARAMETER Severity
-    Is the event severity. Supported severities are: Debug, Information, Warning and Error
-.PARAMETER EventID
-    Is the event ID logged in the application log
-.EXAMPLE
-    write-log -Message "My message" - Severity Information -EventID 0
-        This will create a new log line in the debug log file, create a eventlog entry in the application log and writes the 
-        message parameter to the console
 #>
 function Write-Log {
     param (
@@ -199,38 +257,52 @@ function Write-Log {
     )
 
 
-    #Format the log message and write it to the log file
+    # The CSV-like line includes enough context to correlate concurrent executions.
     $LogLine = "$(Get-Date -Format o),$($PID), [$Severity],[$EventID], $Message"
     Write-Debug -Message $LogLine
-    Add-Content -Path $LogFile -Value $LogLine -Force
-    #If the severity is not debug write the even to the event log and format the output
+    if (-not $script:IsWhatIf) {
+        Add-Content -Path $LogFile -Value $LogLine -Force
+    }
+
+    # Debug entries remain file-only; operational severities are also surfaced to Windows.
     switch ($Severity) {
         'Error' { 
             Write-Host $Message -ForegroundColor Red
-            Add-Content -Path $LogFile -Value $Error[0].ScriptStackTrace 
-            Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Error -Message $Message 
+            if (-not $script:IsWhatIf) {
+                Add-Content -Path $LogFile -Value $Error[0].ScriptStackTrace
+                Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Error -Message $Message
+            }
         }
         'Warning' { 
-            Write-Host $Message -ForegroundColor Yellow 
-            Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Warning -Message $Message
+            Write-Host $Message -ForegroundColor Yellow
+            if (-not $script:IsWhatIf) {
+                Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Warning -Message $Message
+            }
         }
         'Information' { 
-            Write-Host $Message 
-            Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Information -Message $Message
+            Write-Host $Message
+            if (-not $script:IsWhatIf) {
+                Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Information -Message $Message
+            }
         }
     }
 }
 
 #region Script Variables
 
-$ScriptVersion = "0.1.20260929.3"
+# Runtime identity and security settings used throughout the workflow.
+$ScriptVersion = "0.1.20260929.4"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"
+
+# Bounds are enforced at runtime so scheduled invocations cannot use unsafe delays.
 $AzSyncWaitTimeMin = 15
 $AzSyncWaitTimeMax = 900
 $TGTLifetimeHoursMin = 0
 $TGTLifetimeHoursMax = 24
+
+# Infrastructure constants for logging and Active Directory discovery.
 [int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $GlobalCatalogPort = 3268
@@ -243,10 +315,13 @@ $AzureADSSOAccName = "AzureADSSOAcc"
 
 #region Manage log file
 try {   
-    # Check if the source exists; if not, create it
-    if (-not [System.Diagnostics.EventLog]::SourceExists($source)) {
+    # Event source creation requires administrative rights and must happen before logging.
+    if (-not $script:IsWhatIf -and -not [System.Diagnostics.EventLog]::SourceExists($source)) {
         Write-Debug "Creating event source $source in log $eventLog"
         [System.Diagnostics.EventLog]::CreateEventSource($source, $eventLog)
+    }
+    elseif ($script:IsWhatIf) {
+        Write-Debug "WhatIf: Skip Windows event source creation."
     }
 }
 catch {
@@ -254,6 +329,7 @@ catch {
     return 0x3EA 
 }
 
+# Normalize the optional path before constructing a script-specific log file name.
 if ($LogPath -eq ""){
     $LogPath = $env:LOCALAPPDATA
 } else {
@@ -269,8 +345,8 @@ if ($LogPath -eq ""){
 $LogFile = "$LogPath\$(if($psise) {[System.IO.Path]::GetFileNameWithoutExtension($psise.CurrentFile.FullPath)} else {$MyInvocation.MyCommand}).log"
 Write-Debug "Using $LogFile as log file"
 
-#Manage the log file size. If the log file is larger than 1MB, rename it to .sav and create a new log file
-if (Test-Path $LogFile){
+# Keep one previous 1 MB log generation to prevent unbounded disk usage.
+if (-not $script:IsWhatIf -and (Test-Path $LogFile)){
     if ((Get-Item $LogFile ).Length -gt $MaxLogFileSize){
         if (Test-Path "$LogFile.sav"){
             Remove-Item "$LogFile.sav"
@@ -282,14 +358,21 @@ if (Test-Path $LogFile){
 #endregion
 
 Write-Log "=========================================" -Severity Debug -EventID 0 
-Write-Log "Script version $ScriptVersion running as $($env:USERNAME) Debug log: $LogFile" -Severity Information -EventID 3000
+if ($script:IsWhatIf) {
+    Write-Log "Script version $ScriptVersion running as $($env:USERNAME) in WhatIf mode; file and event logging are disabled" -Severity Information -EventID 3000
+}
+else {
+    Write-Log "Script version $ScriptVersion running as $($env:USERNAME) Debug log: $LogFile" -Severity Information -EventID 3000
+}
 Write-Log -Message "The script started with $($MyInvocation.Line) - Process ID $($PID)" -Severity Debug -EventID 0
 Write-Log -Message "Current user $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Severity Debug -EventID 0 
-Write-Log -Message "Parameters: AzureADSSOModule: $AzureADSSOModule, RollOverADAccountName: $RollOverADAccountName, RollOverAccountUPN: $RollOverAccountUPN, LogPath: $LogPath, AzureSyncWaitTime: $AzureSyncWaitTime, DoNotStartSync: $DoNotStartSync, TGTLifetimeHours: $TGTLifetimeHours" -Severity Debug -EventID 0
+Write-Log -Message "Parameters: AzureADSSOModule: $AzureADSSOModule, RollOverADAccountName: $RollOverADAccountName, RollOverAccountUPN: $RollOverAccountUPN, LogPath: $LogPath, AzureSyncWaitTime: $AzureSyncWaitTime, DoNotStartSync: $DoNotStartSync, TGTLifetimeHours: $TGTLifetimeHours, IgnoreTGTLifetimeCheck: $IgnoreTGTLifetimeCheck, WhatIf: $script:IsWhatIf" -Severity Debug -EventID 0
 
 
 Try {
-    #region Import the required modules
+    #region Import dependencies
+    # AzureADSSO updates seamless SSO, ActiveDirectory performs directory operations,
+    # and ADSync optionally starts the synchronization cycle.
     if (!(Get-Module -Name AzureADSSO)){
         Import-Module $AzureADSSOModule -Force -ErrorAction Stop
         Write-Log -Message "Imported AzureADSSO Module" -Severity Debug -EventID 0
@@ -304,8 +387,8 @@ Try {
     }
 
     #endregion
-    #region Validate parameters
-    #region Validate the Azure Sync Wait Time. 
+    #region Validate runtime inputs
+    #region Validate synchronization wait time
 
     if ($AzureSyncWaitTime -lt $AzSyncWaitTimeMin){
             Write-log -Message "The azure wait time $AzSyncWaitTime seconds to synchronize the password is to low. It must be higher then $AzSyncWaitTimeMin seconds" -Severity Warning -EventID 3100
@@ -315,7 +398,7 @@ Try {
             $AzSyncWaitTime = $AzSyncWaitTimeMax
     }
     #endregion 
-    #region validate the TGT lifetime hours
+    #region Validate TGT lifetime
     if ($TGTLifetimeHours -lt $TGTLifetimeHoursMin){
         Write-Log "The TGTLifeTime parameter is lower then $TGTLifeTimeHoursMin. Using $TGTLifeTimeHoursMin" -Severity Warning -EventID 3112
         $TGTLifetimeHours  = $TGTLifeTimeHoursMin
@@ -324,7 +407,7 @@ Try {
         $TGTLifeTimeHours = $TGTLifeTimeHoursMax
     }
     #endregion
-    #region validate user
+    #region Validate rollover account
     if (!(Get-ADuser -Filter {SamAccountName -eq $RollOverADAccountName})){
         Write-Log -Message "can not find $RollOverADAccountName in the current active directory domain" -Severity Error -EventID 3109
         throw [System.ArgumentException] "The Kerberos RollOver Account $RollOverADAccountName does not exist in the current active directory domain"
@@ -333,11 +416,13 @@ Try {
 #endregion
 
     
-    #if the UPN match to the active directory UPN read the UPN from the AD account
+    # Prefer the directory value so callers only need to supply a UPN when it differs.
     if (!$RollOverAccountUPN) {
         $RollOverAccountUPN = (get-ADuser $RollOverADAccountName).UserPrincipalName
     }
     write-Log -Message "Using $RollOverAccountUPN as UPN for the Kerberos RollOver Account" -Severity Debug -EventID 0
+
+    # AzureADSSOAcc can reside in another domain, so discover it forest-wide first.
     $GlobalCatalogServer = '{0}:{1}' -f (Get-ADDomainController -Discover -Service GlobalCatalog).HostName.Value, $GlobalCatalogPort
     write-Log -Message "Using $GlobalCatalogServer as Global Catalog server" -Severity Debug -EventID 0
     $gcAzureADSsoAcc = Get-ADComputer -Filter {Name -eq $AzureADSSOAccName } -Server "$GlobalCatalogServer" -Properties CanonicalName
@@ -345,12 +430,13 @@ Try {
         Write-Log -Message "AzureADSSOAcc computer account not found in the Global Catalog. Please ensure the Azure AD Connect is installed and configured." -Severity Error -EventID 3106
         throw [System.ArgumentException] "The AzureADSSOAcc computer account was not found in the Global Catalog"
     }
-    #extracting domain name from the AzureADSSOAcc computer account
+    # CanonicalName begins with the owning DNS domain; query that domain for pwdLastSet.
     $gcAzureADSsoAcc.CanonicalName -match "[^/]+" |Out-Null
     $DomainName = $matches[0] 
     $AzureADSsoAcc = Get-ADcomputer -Filter {Name -eq $AzureADSSOAccName} -server $DomainName -Properties pwdLastSet
     $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($AzureADSsoAcc.pwdLastSet)
     Write-Log -Message "The AzureADSSOAcc computer account was last password reset at $AzureADSsoAccPwdLastSet" -Severity Debug -EventID 0
+    # Avoid invalidating Kerberos tickets that may still be active from the last rollover.
     if ($IgnoreTGTLifetimeCheck){
         Write-Log -Message "Skipping the TGT lifetime check as the IgnoreTGTLifetimeCheck switch is set" -Severity Warning -EventID 3008
     } else {
@@ -360,8 +446,14 @@ Try {
         }
     }
     
-    # Reset the Kerberos RollOver Account Password
-        #generate a random password for the Kerberos RollOver Account
+    $rolloverTarget = "$RollOverADAccountName and $AzureADSSOAccName"
+    $rolloverAction = "Reset the rollover account password, synchronize it if enabled, and update the seamless SSO Kerberos key"
+    if (-not $PSCmdlet.ShouldProcess($rolloverTarget, $rolloverAction)) {
+        Write-Log -Message "Rollover skipped because WhatIf was specified or confirmation was declined" -Severity Information -EventID 3000
+        return
+    }
+
+    # Reset the synchronized identity before publishing the same secret to seamless SSO.
     Write-Log -Message "Generate a new random password for the Kerberos RollOver Account" -Severity Debug -EventID 0
     $secPwd = New-RandomPassword -length $passwordSize 
     Set-ADAccountPassword -Identity $RollOverADAccountName -NewPassword (ConvertTo-SecureString $secPwd -AsPlainText -Force) -Reset -ErrorAction Stop
@@ -377,7 +469,7 @@ Try {
     } else {
         Write-Log -Message "Skip starting the Azure AD Sync" -Severity Debug -EventID 0
     }
-    #wating for the sync to complete
+    # Allow the new credential to reach Microsoft Entra ID before authenticating with it.
     Write-Log -Message "wait $AzureSyncWaitTime secondes for replication to complete..." -Severity Debug -EventID 0
     Start-Sleep -Seconds $AzureSyncWaitTime
     #create temporary file for the new PowerShell process
@@ -387,7 +479,7 @@ Try {
     $acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($ADUser, "FullControl", "Allow")))
     Set-Acl -Path $PSShellTempFile.FullName -AclObject $acl
 
-    #region connect to Azure AD with the Kerberos RollOver Account
+    #region Update seamless SSO as the rollover account
     $rollOverTask = @"
             Write-host \"Starting AzureADSSO Forest update...\"
             #Import-Module \"$AzureADSSOModule\" -erroraction stop -verbose 
@@ -399,6 +491,7 @@ Try {
 "@
 [pscredential]$AdCredential = New-object System.Management.Automation.PSCredential($ADUser,(ConvertTo-SecureString $secPwd -AsPlainText -Force))
 Write-Log -Message "Impersonating user $ADUser to update the Azure Kerberos object" -Severity Debug -EventID 0
+# A separate process provides the rollover account's user and device authentication context.
 $ADSSResetJob = Start-Job -Credential $AdCredential -ScriptBlock {
     param ($AzureADSSOModule, $RollOverAccountUPN, $ADUser, $secPwd)
     Import-Module $AzureADSSOModule -erroraction stop -verbose 
@@ -418,20 +511,17 @@ Write-Log -Message "AzureADSSO Forest update completed" -Severity Information -E
 $ADSSResetJob | Remove-Job
 
     #endregion
-    #to avoid ADWS caching issues the pwdLastSet attribute will be read from the PDC emulator
-    #Get PDC emulator
+    # Read directly from the PDC emulator to avoid stale AD Web Services cache data.
     $PDCEmulator = (Get-ADDomain).PDCEmulator
-    #Connect to PDC emulator
     $LDAPPath = "LDAP://$PDCEmulator"
     $Searcher = New-Object System.DirectoryServices.DirectorySearcher
     $Searcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry($LDAPPath)
     $Searcher.Filter = "(&(objectClass=computer)(sAMAccountName=$AzureADSSOAccName`$))"
     $Searcher.PropertiesToLoad.Add("pwdLastSet") | Out-Null
-    #Search for the AzureADSSOAcc computer account on the PDC emulator
+    # Verify the computer-account password changed during this execution window.
     $Result = $Searcher.FindOne()
     $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($Result.Properties.pwdlastset[0])
     Write-Log -Message "The AzureADSSOAcc computer account was last password reset at $AzureADSsoAccPwdLastSet (read from PDC emulator $PDCEmulator)" -Severity Debug -EventID 0
-    #Verify if the password was updated within the last 15 minutes  
     if ($AzureADSsoAccPwdLastSet -gt (Get-Date).AddMinutes(-15)) {
         Write-Log -Message "The AzureADSSOAcc computer account password was successfully updated at $AzureADSsoAccPwdLastSet" -Severity Information -EventID 3003
     } else {
