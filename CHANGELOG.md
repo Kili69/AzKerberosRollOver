@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.20260929.2] - 2026-09-29
+
+### Changed
+
+- Added: `.githooks/pre-merge-commit`
+- Modified: `README.md`
+
 ## [0.1.20260929.1] - 2026-09-29
 
 ### Changed

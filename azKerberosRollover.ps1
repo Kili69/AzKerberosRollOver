@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 0.1.20260929.1
+.VERSION 0.1.20260929.2
 .GUID 2efdf5d8-370e-425c-afad-e5951a84f893
 
 .AUTHOR Andreas Lucas [MSFT]
@@ -216,7 +216,7 @@ function Write-Log {
 ######################################################
 
 #region Manage log file
-$ScriptVersion = "0.1.20260929.1"
+$ScriptVersion = "0.1.20260929.2"
 $passwordSize = 32
 [int]$MaxLogFileSize = 1048576 #Maximum size of the log file in bytes (1MB)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

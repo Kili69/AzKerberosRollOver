@@ -46,5 +46,6 @@ Enable the repository-managed Git hook once after cloning:
 git config core.hooksPath .githooks
 ```
 
-The hook updates both the PowerShell script metadata and `$ScriptVersion`, then stages
-the script and changelog so that both updates are part of the commit.
+The hooks cover regular and merge commits. They update both the PowerShell script
+metadata and `$ScriptVersion`, then stage the script and changelog so that both
+updates are part of the commit.
