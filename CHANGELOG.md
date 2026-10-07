@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.20261007.1] - 2026-10-07
+
+### Changed
+
+- Modified: `README.md`
+- Modified: `developer.md`
+- Added: `docs/assets/azkerberosrollover-logo.png`
+
 ## [0.1.20260929.4] - 2026-09-29
 
 ### Changed

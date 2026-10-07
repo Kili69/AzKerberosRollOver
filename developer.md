@@ -106,6 +106,38 @@ git show -- CHANGELOG.md
 
 Do not manually add an entry for an ordinary commit. Manual edits are appropriate when correcting historical text or providing release context that cannot be derived from file status alone.
 
+## Complete rollover workflow
+
+The following diagram includes the prerequisite checks, safety decisions, dry-run path, rollover, and final verification:
+
+```mermaid
+flowchart TD
+    Start([Start script]) --> Modules[Load required PowerShell modules]
+    Modules --> Validate[Validate parameters and rollover account]
+    Validate --> Discover[Locate AzureADSSOAcc through a Global Catalog]
+    Discover --> Age{Previous key older than<br/>the configured TGT lifetime?}
+
+    Age -- No --> Ignore{IgnoreTGTLifetimeCheck enabled?}
+    Ignore -- No --> Stop([Stop without changing passwords])
+    Ignore -- Yes --> DryRun
+    Age -- Yes --> DryRun{WhatIf enabled?}
+    DryRun -- Yes --> Preview([Report planned rollover and stop])
+    DryRun -- No --> Reset[Generate password and reset rollover account]
+
+    Reset --> Sync{Start ADSync cycle?}
+    Sync -- Yes --> StartSync[Start delta synchronization]
+    Sync -- No --> Wait
+    StartSync --> Wait[Wait for credential replication]
+
+    Wait --> Job[Run background job as rollover account]
+    Job --> Authenticate[Authenticate to AD and Microsoft Entra ID]
+    Authenticate --> Update[Run Update-AzureADSSOForest]
+    Update --> Verify[Read AzureADSSOAcc pwdLastSet from PDC emulator]
+    Verify --> Updated{Password updated recently?}
+    Updated -- Yes --> Success([Rollover successful])
+    Updated -- No --> Error([Log error and stop])
+```
+
 ## PowerShell compatibility
 
 - Keep the script compatible with Windows PowerShell on Microsoft Entra Connect servers.
