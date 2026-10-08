@@ -10,7 +10,7 @@ This document contains contributor information that is intentionally kept separa
 | [`README.md`](README.md) | Installation, operation, parameters, and user-facing examples. |
 | [`EventID.md`](EventID.md) | Windows event identifier reference. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Automatically maintained release history. |
-| [`LICENSE`](LICENSE) | GNU General Public License v3.0 terms for this project. |
+| [`LICENSE`](LICENSE) | MIT License terms for this project. |
 | [`.githooks/`](.githooks/) | Repository-managed hooks for regular and merge commits. |
 | [`tools/Update-Version.ps1`](tools/Update-Version.ps1) | Version and changelog generator called by the hooks. |
 

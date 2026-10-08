@@ -8,9 +8,9 @@
   [![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
   [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
   [![Microsoft Entra](https://img.shields.io/badge/Microsoft-Entra_ID-5C2D91?logo=microsoft&logoColor=white)](https://www.microsoft.com/security/business/identity-access/microsoft-entra-id)
-  [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+  [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-  [Overview](#overview) · [The problem](#the-problem) · [The solution](#the-solution) · [Installation](#installation) · [Monitoring](#monitoring) · [Troubleshooting](#troubleshooting) · [Contributors](#contributors) · [Developer information](#developer-information) · [License](#license)
+  [Overview](#overview) · [The problem](#the-problem) · [The solution](#the-solution) · [Installation](#installation) · [Script parameters](#script-parameters) · [Monitoring](#monitoring) · [Troubleshooting](#troubleshooting) · [Contributors](#contributors) · [Developer information](#developer-information) · [License](#license)
 </div>
 
 ---
@@ -304,7 +304,7 @@ Open an elevated Windows PowerShell session and preview the rollover without mak
     -RollOverAccountUPN 'AzKrbRollOver@contoso.com'
 ```
 
-### Script parameters
+## Script parameters
 
 The following examples use the installed script path:
 
@@ -312,7 +312,7 @@ The following examples use the installed script path:
 $scriptPath = "$env:ProgramFiles\AzKerberosRollOver\azKerberosRollover.ps1"
 ```
 
-#### `-AzureADSSOModule`
+### `-AzureADSSOModule`
 
 Specifies the full path to `AzureADSSO.psd1`. The default is the standard Microsoft Entra Connect installation path:
 
@@ -328,7 +328,7 @@ Use a custom module location:
     -AzureADSSOModule 'D:\EntraConnect\AzureADSSO.psd1'
 ```
 
-#### `-RollOverADAccountName`
+### `-RollOverADAccountName`
 
 Specifies the Active Directory `sAMAccountName` of the synchronized worker account. The default is `AzKrbRollOver`.
 
@@ -340,7 +340,7 @@ Use a worker account with a different `sAMAccountName`:
     -RollOverAccountUPN 'SvcKrbRollover@contoso.com'
 ```
 
-#### `-RollOverAccountUPN`
+### `-RollOverAccountUPN`
 
 Specifies the Microsoft Entra UPN of the worker account. When this parameter is omitted, the script reads the UPN from the matching Active Directory user. Supplying it explicitly is recommended for scheduled execution.
 
@@ -349,7 +349,7 @@ Specifies the Microsoft Entra UPN of the worker account. When this parameter is 
     -RollOverAccountUPN 'AzKrbRollOver@contoso.com'
 ```
 
-#### `-LogPath`
+### `-LogPath`
 
 Specifies the directory for `azKerberosRollover.ps1.log`. When omitted or invalid, the script uses `%LOCALAPPDATA%`. If a file path is supplied, the script uses its parent directory.
 
@@ -361,7 +361,7 @@ Write the log to `C:\Logs`:
     -LogPath 'C:\Logs'
 ```
 
-#### `-AzureSyncWaitTime`
+### `-AzureSyncWaitTime`
 
 Specifies how many seconds the script waits after starting an Entra Connect synchronization. The default is `60`. Values below `15` are raised to `15`, and values above `900` are reduced to `900`.
 
@@ -373,7 +373,7 @@ Wait two minutes for synchronization:
     -AzureSyncWaitTime 120
 ```
 
-#### `-DoNotStartSync`
+### `-DoNotStartSync`
 
 Prevents the script from calling `Start-ADSyncSyncCycle`. Use this switch when password synchronization is triggered or managed separately.
 
@@ -383,7 +383,7 @@ Prevents the script from calling `Start-ADSyncSyncCycle`. Use this switch when p
     -DoNotStartSync
 ```
 
-#### `-TGTLifetimeHours`
+### `-TGTLifetimeHours`
 
 Specifies the minimum age of the current `AzureADSSOAcc` password before another rollover is allowed. The default is `10` hours. Values are limited to `0` through `24`; a value of `0` allows an immediate rollover.
 
@@ -395,7 +395,7 @@ Require the current key to be at least 12 hours old:
     -TGTLifetimeHours 12
 ```
 
-#### `-IgnoreTGTLifetimeCheck`
+### `-IgnoreTGTLifetimeCheck`
 
 Bypasses the TGT lifetime safety check and continues regardless of the previous `AzureADSSOAcc` password update time.
 
@@ -408,7 +408,7 @@ Bypasses the TGT lifetime safety check and continues regardless of the previous 
 > [!CAUTION]
 > Use `-IgnoreTGTLifetimeCheck` only after assessing the risk. Kerberos tickets issued with the previous key may still be active.
 
-#### `-WhatIf`
+### `-WhatIf`
 
 Validates the prerequisites and reports the planned rollover without changing passwords, starting synchronization, updating seamless SSO, or writing logs.
 
@@ -457,6 +457,37 @@ See the [event ID reference](EventID.md) for the events, severities, and message
 
 Start troubleshooting by reviewing the local log file and the Windows Application events. Use the [event ID reference](EventID.md) to identify the failed stage and its meaning.
 
+### Exit codes
+
+The scheduled PowerShell process returns the following exit codes to Task Scheduler:
+
+| Exit code | Decimal | Meaning | Recommended action |
+| --- | ---: | --- | --- |
+| `0x0` | `0` | The script completed successfully, or `-WhatIf` completed without making changes. | No action is required. |
+| `0x1` | `1` | The rollover workflow terminated with an error. | Review the local log and Windows Application events to identify the failed operation. |
+| `0x3EA` | `1002` | The `AzureKrbRollOver` Windows event source could not be created. | Run the task with administrative rights or create the event source before the next run. |
+
+The most recent result is displayed in the **Last Run Result** column in Task Scheduler. A value other than `0x0` indicates that the execution requires investigation.
+
+### Event errors
+
+The following errors can be written to the Windows Application event log. See the [event ID reference](EventID.md) for the complete event catalog.
+
+| Event ID | Error | Recommended action |
+| --- | --- | --- |
+| `3102` | The worker account password could not be reset because access was denied. | Verify that the task runs as `SYSTEM` and that the Entra Connect server computer account has **Change Password** and **Reset Password** rights on the worker account. |
+| `3103` | Multifactor authentication is enforced for the worker account. | Review the authentication requirements and Conditional Access policies applied to the worker account. |
+| `3104` | Authentication of the worker account was blocked by multifactor requirements. | Confirm that the account and device context satisfy the applicable Conditional Access policies. |
+| `3105` | The new worker account password is not available in Microsoft Entra ID. | Check Entra Connect synchronization health and increase `-AzureSyncWaitTime` if synchronization regularly takes longer. |
+| `3106` | `AzureADSSOAcc` could not be found through the Global Catalog. | Verify that seamless SSO is configured and that the Entra Connect server can contact a Global Catalog. |
+| `3108` | The `AzureADSSOAcc` password was not updated by the rollover. | Review the job output and authentication events, then confirm connectivity to the PDC emulator before retrying. |
+| `3109` | The configured worker account could not be found in Active Directory. | Verify `-RollOverADAccountName` and confirm that the account exists in the current domain. |
+| `3110` | An invalid argument was supplied or a required PowerShell command is unavailable. | Review the supplied parameters and confirm that all required modules and commands are installed. |
+| `3111` | A required PowerShell module could not be loaded. | Confirm that `AzureADSSO`, `ActiveDirectory`, and `ADSync` are installed and verify `-AzureADSSOModule`. |
+| `3197` | The script could not write to its log file. | Verify that the log directory exists, has free space, and grants write access to the task identity. |
+| `3198` | An invalid operation or authentication operation failed. | Review the detailed local log and Microsoft Entra sign-in logs for the underlying exception. |
+| `3199` | An unexpected error occurred. | Review the detailed local log and Windows event message for the exception and failed operation. |
+
 Confirm that all required PowerShell modules are available:
 
 ```powershell
@@ -489,4 +520,4 @@ Repository setup, implementation details, versioning, Git hooks, contribution gu
 
 ## License
 
-AzKerberosRollOver is licensed under the [GNU General Public License v3.0](LICENSE).
+AzKerberosRollOver is licensed under the [MIT License](LICENSE).

@@ -20,13 +20,13 @@ This script writes events t the application log and to the Debuglog File. The fo
 |3105    | Error       | Password Error, the password is not synced to Entra.ID                     |
 |3106    | Error       | The AzuerADssoACC account could not be found in the global catalog         |
 |3107    | Warning     | The latest password reset doesn't expired the TGT lifetime                 |
-|3108    | Error       | The rollover user account could not be found                               |
-|3109    | Error       | The active directory user could not be found                               |    
-|3110    | Error       | Invalid Argument provided                                                  |
+|3108    | Error       | The AzureADSSOAcc password was not updated                                 |
+|3109    | Error       | The configured rollover account could not be found in Active Directory     |
+|3110    | Error       | An invalid argument was provided or a required command is unavailable      |
 |3111    | Error       | A Powershell Module is missing                                             |
 |3112    | Warning     | The TGT life time is below the minimum supported value                     |
 |3113    | Warning     | The TGT life time exceed the maximum supported value                       |
 |3196    | Warning     | Script terminated with errors                                              |
 |3197    | Error       | Can not write to log file                                                  |
-|3198    | Error       | Unknown authenthentication error                                           |  
+|3198    | Error       | An invalid operation or authentication operation failed                    |
 |3199    | Error       | A unexpected error occurs                                                  |

@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 0.1.20261008.1
+.VERSION 0.1.20261008.2
 .GUID 2efdf5d8-370e-425c-afad-e5951a84f893
 
 .AUTHOR Andreas Lucas [MSFT]
@@ -43,46 +43,6 @@ interruption, loss of business information, or other pecuniary loss) arising out
 inability to use the sample scripts or documentation, even if Microsoft has been advised of the 
 possibility of such damages
 
-History
-Version 0.1
-    Initial version of the script.
-Version 0.1.20250501
-    Code comments and formatting changes
-    New parameter for the log file location
-Version 0.1.20250504
-    addtional error logging
-Version 0.1.20250508
-    detect if the script is running in PS-ISE and use the correct log file name
-    Parameter AzSyncWaitTime  added validation for 15 to 120 seconds
-Version 0.1.20250509
-    Parameter RollOverAccountUPN added validation for UPN format
-    Parameter AzureADSSOModule added validation for the module path
-    Parameter LogPath added validation for the log file path
-    Parameter DoNotStartSync added to skip the Azure AD Sync after resetting the password
-    Parameter RollOverADAccountName added validation for the Samaccount name of the Kerberos RollOver Account
-    If a new line cannot be added the debug log based on a sharing violation, the script will retry 3 times before failing 
-Version 0.1.20250808
-    Added parameter TGTLifetimeHours to check if the password of the AzureADSSOAccount has been changed within the last x hours. Default value is 10 hours.
-    smal bug bugfixes
-Version 0.1.20251006
-    Parameter validation is now in the code on on the parameter level
-    Fixed a bug if the script runs in PSISE the log file name is now correct
-    If unsupported parameter values are used the script will now use the default values
-    if the tgtlifetime is set to 0 the AzureADSSO check is skipped
-    New event IDs for better error handling added. see EventID.md for details
-Version 0.1.20251007
-    Added more error handling and logging
-Version 0.1.20251014
-    The script readn the AzureADSSOAcc computer account from the global catalog and read the PwdLastSet property from the AD Object. The AzureADSSOAcc computer account can now located in a different domain then the Azure AD-Sync computer
-    Bug-fix in Error handling
-Version 0.1.20251107
-    The update of the Kerberos SSO object is now executed in a new PowerShell process running under the Kerberos RollOver Account context. This should fix issues if the user is restricted with conditional access policies. 
-    If the script is executed as system, the device id will not provide the Azure device information. With the impersonation of the Rollover account the azure login will provide the device ID. Within this information the account can be restricted to a single device.
-Version 0.1.20251108
-    Minor documentation fix   
-Version 0.1.20251110 
-    New parameter IgnoreTGTLifetimeCheck to skip the TGT lifetime check. The reset of the Kerberos RollOver Account password will be performed even if the AzureADSSOAcc password last set is within the TGT lifetime.
-
 #>
 
 <#
@@ -106,6 +66,7 @@ Version 0.1.20251110
 
     Return codes:
     0x0    Success
+    0x1    The rollover workflow terminated with an error.
     0x3EA  The Windows event source could not be created.
 
 .PARAMETER AzureADSSOModule
@@ -291,7 +252,7 @@ function Write-Log {
 #region Script Variables
 
 # Runtime identity and security settings used throughout the workflow.
-$ScriptVersion = "0.1.20261008.1"
+$ScriptVersion = "0.1.20261008.2"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"
@@ -326,7 +287,7 @@ try {
 }
 catch {
     Write-EventLog -logname $eventLog -source "Application" -EventId 0 -EntryType Error -Message "The event source $source could not be created. The script $($MyInvocation.MyCommand) is terminated. Please run the script with elevated privileges or create the Event source $source manually."
-    return 0x3EA 
+    exit 0x3EA
 }
 
 # Normalize the optional path before constructing a script-specific log file name.
@@ -368,6 +329,8 @@ Write-Log -Message "The script started with $($MyInvocation.Line) - Process ID $
 Write-Log -Message "Current user $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Severity Debug -EventID 0 
 Write-Log -Message "Parameters: AzureADSSOModule: $AzureADSSOModule, RollOverADAccountName: $RollOverADAccountName, RollOverAccountUPN: $RollOverAccountUPN, LogPath: $LogPath, AzureSyncWaitTime: $AzureSyncWaitTime, DoNotStartSync: $DoNotStartSync, TGTLifetimeHours: $TGTLifetimeHours, IgnoreTGTLifetimeCheck: $IgnoreTGTLifetimeCheck, WhatIf: $script:IsWhatIf" -Severity Debug -EventID 0
 
+
+$scriptExitCode = 0
 
 Try {
     #region Import dependencies
@@ -531,6 +494,7 @@ $ADSSResetJob | Remove-Job
     Write-Log -Message "Successfully updated the Azure Kerberos object" -Severity Information -EventID 3004
 } 
 catch{
+    $scriptExitCode = 0x1
     Write-Log -Message "An error occurred:$($_.Exception.Message) $($_.InvocationInfo.PositionMessage)" -Severity Debug -EventID 0
     switch ($_.Exception){
         {$_ -is [System.InvalidOperationException]}{
@@ -567,10 +531,12 @@ catch{
     }    
 }
 finally {
-    if ($Error.Count -gt 0) {
+    if ($scriptExitCode -ne 0) {
         Write-Log -Message "Script terminated with error: $($Error[0].Exception.Message)" -Severity Warning -EventID 3196
     } else {
         Write-Log -Message "Script completed successfully" -Severity Information -EventID 3006
     }
     Write-Log "=========================================" -Severity Debug -EventID 0
 }
+
+exit $scriptExitCode
