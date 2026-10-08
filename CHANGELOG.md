@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.20261008.1] - 2026-10-08
+
+### Changed
+
+- Modified: `README.md`
+- Modified: `developer.md`
+
 ## [0.1.20261007.1] - 2026-10-07
 
 ### Changed

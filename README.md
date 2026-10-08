@@ -10,7 +10,7 @@
   [![Microsoft Entra](https://img.shields.io/badge/Microsoft-Entra_ID-5C2D91?logo=microsoft&logoColor=white)](https://www.microsoft.com/security/business/identity-access/microsoft-entra-id)
   [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
-  [Getting started](#getting-started) · [How it works](#how-it-works) · [Parameters](#parameters) · [Logging](#logging) · [Development](#development)
+  [Overview](#overview) · [The problem](#the-problem) · [The solution](#the-solution) · [Installation](#installation) · [Monitoring](#monitoring) · [Troubleshooting](#troubleshooting) · [Contributors](#contributors) · [Developer information](#developer-information) · [License](#license)
 </div>
 
 ---
@@ -19,78 +19,277 @@
 
 AzKerberosRollOver automates the rollover of the Microsoft Entra seamless single sign-on Kerberos decryption key. The PowerShell script resets a synchronized Active Directory rollover account and updates the `AzureADSSOAcc` computer account through the Microsoft `AzureADSSO` module.
 
-Microsoft Entra seamless SSO uses the `AzureADSSOAcc` computer account in Active Directory to encrypt and decrypt Kerberos tickets. The password of this account acts as the Kerberos decryption key. [Microsoft recommends rolling over this key at least every 30 days](https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-sso-faq#how-can-i-roll-over-the-kerberos-decryption-key-of-the-%60azureadsso%60-computer-account) to limit how long a compromised key could be used.
+<p>
+  🛡️ Securely manages the Kerberos decryption key for Microsoft Entra seamless SSO.<br>
+  🔎 Automatically discovers <code>AzureADSSOAcc</code> across the forest.<br>
+  🔑 Automatically resets the password for the rollover account.<br>
+  👤 Runs the seamless SSO update under the rollover account's identity.<br>
+  ✅ Verifies the update directly against the PDC emulator.<br>
+  📝 Writes diagnostics to the Windows Application event log.
+</p>
 
-| Identity | Purpose |
-| --- | --- |
-| **Rollover account** | A synchronized user account, such as `AzKrbRollOver`, whose password is reset by the script. After synchronization, the new credential authenticates to Active Directory and Microsoft Entra ID. |
-| **`AzureADSSOAcc`** | The computer account containing the seamless SSO Kerberos key. Its password is rotated by `Update-AzureADSSOForest`. |
+## The problem
+
+Microsoft Entra seamless SSO uses the `AzureADSSOAcc` computer account in Active Directory to encrypt and decrypt Kerberos tickets. The password of this account acts as the Kerberos decryption key. If the key is compromised and not rotated regularly, it can remain useful to an attacker for an extended period.
+
+[Microsoft recommends rolling over this key at least every 30 days](https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-sso-faq#how-can-i-roll-over-the-kerberos-decryption-key-of-the-%60azureadsso%60-computer-account).
+
+Microsoft documents the rollover as an interactive administrative process that requires a Microsoft Entra administrator to provide credentials and run the seamless SSO update manually.
+
+## The solution
+
+AzKerberosRollOver is a PowerShell script that automates the password and Kerberos decryption key update process described in the [Microsoft seamless SSO documentation](https://learn.microsoft.com/de-de/entra/identity/hybrid/connect/how-to-connect-sso-faq#wie-kann-ich-den-kerberos-entschl-sselungsschl-ssel-des--azureadsso--computerkontos-erneuern-).
+
+The Microsoft procedure is designed as an interactive administrative workflow. An administrator imports the required modules, authenticates with Microsoft Entra and on-premises credentials, and runs `Update-AzureADSSOForest` for the target forest. AzKerberosRollOver turns these manual steps into a repeatable workflow that can also be scheduled and monitored.
+
+The script uses a synchronized hybrid identity as its rollover account. This account requires the delegated Active Directory permissions needed to update `AzureADSSOAcc` and the **Hybrid Identity Administrator** role in Microsoft Entra ID. During each run, the script generates a new strong random password for the rollover account, synchronizes the credential, and uses the account to run `Update-AzureADSSOForest`.
 
 > [!IMPORTANT]
-> Before making changes, the script checks when `AzureADSSOAcc` was last updated. This prevents a new key from being generated while Kerberos tickets encrypted with the previous key may still be valid.
+> No password for the rollover account is stored on disk or written to a log. The randomly generated password exists only in process memory while the script is running and is discarded when the process ends.
 
-## Highlights
+### Workflow overview
 
-| | Capability |
-| --- | --- |
-| 🛡️ | Enforces a configurable minimum interval between key rollovers. |
-| 🔎 | Discovers `AzureADSSOAcc` across the forest through a Global Catalog. |
-| 🔑 | Generates a new 32-character password for the rollover account. |
-| 🔄 | Optionally starts a Microsoft Entra Connect delta synchronization. |
-| 👤 | Runs the seamless SSO update under the rollover account's identity. |
-| ✅ | Verifies the update directly against the PDC emulator. |
-| 🧪 | Supports `-WhatIf` validation without changing passwords, starting synchronization, or writing logs. |
-| 📝 | Writes diagnostics to a local log and the Windows Application event log. |
+```mermaid
+flowchart LR
+    Check[Check whether a rollover is due]
+    Reset[Set a strong random password<br/>for the rollover account]
+    Sync[Wait for password synchronization]
+    Update[Run Update-AzureADSSOForest]
+    Complete([AzureADSSOAcc key rollover complete])
 
-## Getting started
+    Check --> Reset --> Sync --> Update --> Complete
+```
+
+### azKerberosRollover
+
+The script first loads the required PowerShell modules and checks the configuration, the rollover account, and the timing settings. It then locates the `AzureADSSOAcc` computer account through a Global Catalog and checks when its password was last changed. If Kerberos tickets created with the current key may still be valid, the script stops before making any changes.
+
+When a rollover is safe, the script generates a new 32-character password and assigns it to the synchronized rollover account. It can then start an Entra Connect delta synchronization and waits for the new credential to become available in Microsoft Entra ID. The synchronized account is used to authenticate to Active Directory and Microsoft Entra ID and to run `Update-AzureADSSOForest` in a background job.
+
+Finally, the script reads `pwdLastSet` directly from the PDC emulator to verify that the password of `AzureADSSOAcc` was updated successfully. The result is recorded in the local log and the Windows Application event log so that scheduled executions can be monitored.
+
+## Installation
 
 ### Prerequisites
 
-#### Host
+#### 👤 Worker account
 
-- Windows PowerShell on a Microsoft Entra Connect server.
-- Microsoft Entra Connect with seamless SSO configured.
-- Network access to a Global Catalog and the PDC emulator.
-- Administrative rights when the `AzureKrbRollOver` Application event source must be created for the first time.
+Create a dedicated Active Directory user account to act as the worker account for the rollover process. The account:
 
-#### PowerShell modules
+- Must be synchronized to Microsoft Entra ID.
+- Must have a permanent assignment of the Microsoft Entra **Hybrid Identity Administrator** role.
 
-| Module | Purpose |
-| --- | --- |
-| `AzureADSSO` | Updates the seamless SSO forest configuration. |
-| `ActiveDirectory` | Reads and updates Active Directory objects. |
-| `ADSync` | Starts an optional Entra Connect delta synchronization. |
+#### 🖥️ Entra Connect server
 
-The default `AzureADSSO` module path is:
+#### 🧩 PowerShell modules
+
+The following PowerShell modules must be available on the Microsoft Entra Connect server:
+
+- `AzureADSSO`
+- `ActiveDirectory`
+- `ADSync`
+
+> [!NOTE]
+> The default path of the `AzureADSSO` module is:
+> `C:\Program Files\Microsoft Azure Active Directory Connect\AzureADSSO.psd1`
+
+### Prepare the worker account
+
+The worker account must be able to change and reset the password of the `AzureADSSOAcc` computer object. Delegate only the required **Change Password** and **Reset Password** extended rights instead of granting broad administrative permissions.
+
+Run the following commands once with an account that is allowed to modify permissions on the `AzureADSSOAcc` object:
+
+```powershell
+Import-Module ActiveDirectory
+
+$workerAccount = Get-ADUser -Identity 'AzKrbRollOver'
+$azureAdSsoAccount = Get-ADComputer -Identity 'AzureADSSOAcc'
+$aclPath = "AD:\$($azureAdSsoAccount.DistinguishedName)"
+$acl = Get-Acl -Path $aclPath
+
+$extendedRightGuids = @(
+    [Guid]'ab721a53-1e2f-11d0-9819-00aa0040529b' # Change Password
+    [Guid]'00299570-246d-11d0-a768-00aa006e0529' # Reset Password
+)
+
+foreach ($extendedRightGuid in $extendedRightGuids) {
+    $accessRule = [System.DirectoryServices.ActiveDirectoryAccessRule]::new(
+        $workerAccount.SID,
+        [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
+        [System.Security.AccessControl.AccessControlType]::Allow,
+        $extendedRightGuid
+    )
+    $acl.AddAccessRule($accessRule)
+}
+
+Set-Acl -Path $aclPath -AclObject $acl
+```
+
+Replace `AzKrbRollOver` if a different worker account name is used. The two GUIDs identify the built-in Active Directory extended rights for changing and resetting a password.
+
+Verify the delegated permissions:
+
+```powershell
+$domainNetBiosName = (Get-ADDomain).NetBIOSName
+$workerPrincipal = "$domainNetBiosName\$($workerAccount.SamAccountName)"
+
+(Get-Acl -Path $aclPath).Access |
+    Where-Object {
+        $_.IdentityReference -eq $workerPrincipal -and
+        $_.ObjectType -in $extendedRightGuids
+    } |
+    Select-Object IdentityReference, ActiveDirectoryRights, AccessControlType, ObjectType
+```
+
+### Prepare the Entra Connect server
+
+When the scheduled task runs as `SYSTEM`, it uses the computer account of the Entra Connect server to reset the worker account password. This computer account therefore requires the **Change Password** and **Reset Password** extended rights on the worker account object.
+
+Password-management permissions on the worker account should not be inherited. Disable inheritance on the worker account and restrict password changes and resets to:
+
+- The computer account of the Entra Connect server.
+- The built-in **Domain Admins** group.
+
+> [!CAUTION]
+> Changing an Active Directory ACL can affect account administration. Test the commands in a non-production environment first and review the resulting ACL before using the worker account. The example preserves other inherited permissions as explicit entries, but removes password-management and generic extended-right entries from all principals except the Entra Connect server and Domain Admins.
+
+Run the following commands once with an account that is allowed to modify permissions on the worker account:
+
+```powershell
+Import-Module ActiveDirectory
+
+$domain = Get-ADDomain
+$workerAccount = Get-ADUser -Identity 'AzKrbRollOver'
+$entraConnectServer = Get-ADComputer -Identity $env:COMPUTERNAME
+$domainAdmins = Get-ADGroup -Identity "$($domain.DomainSID)-512"
+$aclPath = "AD:\$($workerAccount.DistinguishedName)"
+$acl = Get-Acl -Path $aclPath
+
+$extendedRightGuids = @(
+    [Guid]'ab721a53-1e2f-11d0-9819-00aa0040529b' # Change Password
+    [Guid]'00299570-246d-11d0-a768-00aa006e0529' # Reset Password
+)
+
+$allowedSids = @(
+    $entraConnectServer.SID.Value
+    $domainAdmins.SID.Value
+)
+
+# Disable inheritance while preserving existing inherited entries as explicit entries.
+$acl.SetAccessRuleProtection($true, $true)
+
+$rulesToRemove = @(
+    $acl.Access | Where-Object {
+        $identitySid = $_.IdentityReference.Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+
+        $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+        ($_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight) -and
+        ($_.ObjectType -eq [Guid]::Empty -or $_.ObjectType -in $extendedRightGuids) -and
+        $identitySid -notin $allowedSids
+    }
+)
+
+foreach ($rule in $rulesToRemove) {
+    [void]$acl.RemoveAccessRuleSpecific($rule)
+}
+
+foreach ($principal in @($entraConnectServer, $domainAdmins)) {
+    foreach ($extendedRightGuid in $extendedRightGuids) {
+        $accessRule = [System.DirectoryServices.ActiveDirectoryAccessRule]::new(
+            $principal.SID,
+            [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
+            [System.Security.AccessControl.AccessControlType]::Allow,
+            $extendedRightGuid
+        )
+        [void]$acl.AddAccessRule($accessRule)
+    }
+}
+
+Set-Acl -Path $aclPath -AclObject $acl
+```
+
+Run the commands on the Entra Connect server or replace `$env:COMPUTERNAME` with the name of that server. Replace `AzKrbRollOver` if a different worker account name is used.
+
+Verify the delegated permissions:
+
+```powershell
+$domainNetBiosName = $domain.NetBIOSName
+$serverPrincipal = "$domainNetBiosName\$($entraConnectServer.SamAccountName)"
+$domainAdminsPrincipal = "$domainNetBiosName\$($domainAdmins.SamAccountName)"
+
+(Get-Acl -Path $aclPath).Access |
+    Where-Object {
+        $_.IdentityReference -in @($serverPrincipal, $domainAdminsPrincipal) -and
+        $_.ObjectType -in $extendedRightGuids
+    } |
+    Select-Object IdentityReference, ActiveDirectoryRights, AccessControlType, ObjectType
+```
+
+> [!NOTE]
+> If the scheduled task runs under a dedicated service account instead of `SYSTEM`, delegate these rights to that service account rather than to the Entra Connect server computer account.
+
+### Copy the script
+
+Download or clone the repository on the Entra Connect server. Open an elevated Windows PowerShell session in the repository directory and copy the script to a permanent location. A directory under `Program Files` is recommended:
+
+```powershell
+$installPath = Join-Path $env:ProgramFiles 'AzKerberosRollOver'
+
+New-Item -Path $installPath -ItemType Directory -Force | Out-Null
+Copy-Item -LiteralPath '.\azKerberosRollover.ps1' -Destination $installPath -Force
+```
+
+The resulting script path is:
 
 ```text
-C:\Program Files\Microsoft Azure Active Directory Connect\AzureADSSO.psd1
+C:\Program Files\AzKerberosRollOver\azKerberosRollover.ps1
 ```
 
-#### Accounts and permissions
+> [!NOTE]
+> Keep the script in a protected directory that cannot be modified by standard users. Update the installed copy when deploying a newer version.
 
-- A synchronized Active Directory rollover account, named `AzKrbRollOver` by default.
-- The rollover account must have the Microsoft Entra role required by the `AzureADSSO` cmdlets, typically **Hybrid Identity Administrator**.
-- The identity running the script must be able to:
-  - Reset the rollover account password.
-  - Read users, domain controllers, and `AzureADSSOAcc` in Active Directory.
-  - Start an ADSync cycle unless `-DoNotStartSync` is used.
+### Create the scheduled task
 
-### Run the rollover
+Create a daily scheduled task that runs the script as `SYSTEM`. The task passes only the required `RollOverAccountUPN` script parameter.
 
-Open an elevated Windows PowerShell session on the Entra Connect server:
+Run the following commands from an elevated Windows PowerShell session and replace the example UPN with the UPN of the synchronized worker account:
 
 ```powershell
-.\azKerberosRollover.ps1 `
-    -RollOverAccountUPN 'AzKrbRollOver@contoso.com'
+$scriptPath = Join-Path $env:ProgramFiles 'AzKerberosRollOver\azKerberosRollover.ps1'
+$rollOverAccountUpn = 'AzKrbRollOver@contoso.com'
+
+$action = New-ScheduledTaskAction `
+    -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RollOverAccountUPN `"$rollOverAccountUpn`""
+
+$trigger = New-ScheduledTaskTrigger -Daily -At '02:00'
+$principal = New-ScheduledTaskPrincipal `
+    -UserId 'SYSTEM' `
+    -LogonType ServiceAccount `
+    -RunLevel Highest
+
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
+
+Register-ScheduledTask `
+    -TaskName 'AzKerberosRollOver' `
+    -Description 'Daily rollover check for the Microsoft Entra seamless SSO Kerberos key.' `
+    -Action $action `
+    -Trigger $trigger `
+    -Principal $principal `
+    -Settings $settings `
+    -Force
 ```
 
-### Preview safely
+The task runs every day at 02:00. Change the value passed to `-At` if a different execution time is required.
 
-Validate the environment and preview the rollover without making changes:
+### Validate the installation
+
+Open an elevated Windows PowerShell session and preview the rollover without making changes:
 
 ```powershell
-.\azKerberosRollover.ps1 `
+& "$env:ProgramFiles\AzKerberosRollOver\azKerberosRollover.ps1" `
     -RollOverAccountUPN 'AzKrbRollOver@contoso.com' `
     -WhatIf
 ```
@@ -98,129 +297,196 @@ Validate the environment and preview the rollover without making changes:
 > [!TIP]
 > Start with `-WhatIf` to validate the account, modules, directory access, and timing requirements before the first rollover.
 
-### Additional examples
-
-<details>
-<summary><strong>Use a custom account, log directory, and replication delay</strong></summary>
+### Run the rollover
 
 ```powershell
-.\azKerberosRollover.ps1 `
-    -RollOverADAccountName 'SvcKrbRollover' `
-    -RollOverAccountUPN 'SvcKrbRollover@contoso.com' `
-    -AzureSyncWaitTime 120 `
-    -LogPath 'C:\Logs'
-```
-
-</details>
-
-<details>
-<summary><strong>Skip the ADSync trigger</strong></summary>
-
-Use this option when synchronization is managed separately:
-
-```powershell
-.\azKerberosRollover.ps1 `
-    -DoNotStartSync `
+& "$env:ProgramFiles\AzKerberosRollOver\azKerberosRollover.ps1" `
     -RollOverAccountUPN 'AzKrbRollOver@contoso.com'
 ```
 
-</details>
+### Script parameters
 
-> [!CAUTION]
-> `-IgnoreTGTLifetimeCheck` bypasses the protection against rolling over the key while Kerberos tickets issued with the previous key may still be active.
+The following examples use the installed script path:
 
-## How it works
-
-1. Imports the required PowerShell modules.
-2. Validates timing parameters and confirms that the rollover account exists.
-3. Locates `AzureADSSOAcc` through a Global Catalog.
-4. Checks `pwdLastSet` and stops if the previous rollover is still within the configured Kerberos ticket-granting ticket (TGT) lifetime.
-5. Generates a password and resets the synchronized rollover account.
-6. Starts an Entra Connect delta synchronization unless synchronization is disabled.
-7. Waits for the configured replication interval.
-8. Starts a background job under the rollover account and updates the seamless SSO forest configuration.
-9. Reads `pwdLastSet` from the PDC emulator and verifies that the update completed.
-
-```mermaid
-flowchart TD
-    Reset[Generate password and reset rollover account] --> Sync{Start ADSync cycle?}
-    Sync -- Yes --> StartSync[Start delta synchronization]
-    Sync -- No --> Wait
-    StartSync --> Wait[Wait for credential replication]
-
-    Wait --> Job[Run background job as rollover account]
-    Job --> Update[Authenticate and run Update-AzureADSSOForest]
-    Update --> Verify[Read AzureADSSOAcc pwdLastSet from PDC emulator]
-    Verify --> Updated{Password updated recently?}
-    Updated -- Yes --> Success([Rollover successful])
-    Updated -- No --> Error([Log error and stop])
+```powershell
+$scriptPath = "$env:ProgramFiles\AzKerberosRollOver\azKerberosRollover.ps1"
 ```
 
-The complete validation and decision flow is documented in the [developer guide](developer.md#complete-rollover-workflow).
+#### `-AzureADSSOModule`
 
-## Parameters
+Specifies the full path to `AzureADSSO.psd1`. The default is the standard Microsoft Entra Connect installation path:
 
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `AzureADSSOModule` | `String` | Standard Entra Connect path | Full path to `AzureADSSO.psd1`. |
-| `RollOverADAccountName` | `String` | `AzKrbRollOver` | Active Directory `sAMAccountName` of the synchronized rollover account. |
-| `RollOverAccountUPN` | `String` | AD user UPN | Microsoft Entra UPN of the rollover account. When omitted, it is read from Active Directory. |
-| `LogPath` | `String` | `%LOCALAPPDATA%` | Log directory. A supplied file path is reduced to its parent directory. |
-| `AzureSyncWaitTime` | `Int32` | `60` | Replication wait time in seconds. Runtime validation restricts it to 15 through 900. |
-| `DoNotStartSync` | `Switch` | Disabled | Skips `Start-ADSyncSyncCycle`. |
-| `TGTLifetimeHours` | `Int32` | `10` | Minimum password age before another rollover. Runtime validation restricts it to 0 through 24. |
-| `IgnoreTGTLifetimeCheck` | `Switch` | Disabled | Forces the workflow to continue regardless of the previous rollover time. |
-| `WhatIf` | Common parameter | Disabled | Validates prerequisites and reports the planned rollover without changing passwords, starting synchronization, updating seamless SSO, or writing logs. |
+```text
+C:\Program Files\Microsoft Azure Active Directory Connect\AzureADSSO.psd1
+```
+
+Use a custom module location:
+
+```powershell
+& $scriptPath `
+    -RollOverAccountUPN 'AzKrbRollOver@contoso.com' `
+    -AzureADSSOModule 'D:\EntraConnect\AzureADSSO.psd1'
+```
+
+#### `-RollOverADAccountName`
+
+Specifies the Active Directory `sAMAccountName` of the synchronized worker account. The default is `AzKrbRollOver`.
+
+Use a worker account with a different `sAMAccountName`:
+
+```powershell
+& $scriptPath `
+    -RollOverADAccountName 'SvcKrbRollover' `
+    -RollOverAccountUPN 'SvcKrbRollover@contoso.com'
+```
+
+#### `-RollOverAccountUPN`
+
+Specifies the Microsoft Entra UPN of the worker account. When this parameter is omitted, the script reads the UPN from the matching Active Directory user. Supplying it explicitly is recommended for scheduled execution.
+
+```powershell
+& $scriptPath `
+    -RollOverAccountUPN 'AzKrbRollOver@contoso.com'
+```
+
+#### `-LogPath`
+
+Specifies the directory for `azKerberosRollover.ps1.log`. When omitted or invalid, the script uses `%LOCALAPPDATA%`. If a file path is supplied, the script uses its parent directory.
+
+Write the log to `C:\Logs`:
+
+```powershell
+& $scriptPath `
+    -RollOverAccountUPN 'AzKrbRollOver@contoso.com' `
+    -LogPath 'C:\Logs'
+```
+
+#### `-AzureSyncWaitTime`
+
+Specifies how many seconds the script waits after starting an Entra Connect synchronization. The default is `60`. Values below `15` are raised to `15`, and values above `900` are reduced to `900`.
+
+Wait two minutes for synchronization:
+
+```powershell
+& $scriptPath `
+    -RollOverAccountUPN 'AzKrbRollOver@contoso.com' `
+    -AzureSyncWaitTime 120
+```
+
+#### `-DoNotStartSync`
+
+Prevents the script from calling `Start-ADSyncSyncCycle`. Use this switch when password synchronization is triggered or managed separately.
+
+```powershell
+& $scriptPath `
+    -RollOverAccountUPN 'AzKrbRollOver@contoso.com' `
+    -DoNotStartSync
+```
+
+#### `-TGTLifetimeHours`
+
+Specifies the minimum age of the current `AzureADSSOAcc` password before another rollover is allowed. The default is `10` hours. Values are limited to `0` through `24`; a value of `0` allows an immediate rollover.
+
+Require the current key to be at least 12 hours old:
+
+```powershell
+& $scriptPath `
+    -RollOverAccountUPN 'AzKrbRollOver@contoso.com' `
+    -TGTLifetimeHours 12
+```
+
+#### `-IgnoreTGTLifetimeCheck`
+
+Bypasses the TGT lifetime safety check and continues regardless of the previous `AzureADSSOAcc` password update time.
+
+```powershell
+& $scriptPath `
+    -RollOverAccountUPN 'AzKrbRollOver@contoso.com' `
+    -IgnoreTGTLifetimeCheck
+```
+
+> [!CAUTION]
+> Use `-IgnoreTGTLifetimeCheck` only after assessing the risk. Kerberos tickets issued with the previous key may still be active.
+
+#### `-WhatIf`
+
+Validates the prerequisites and reports the planned rollover without changing passwords, starting synchronization, updating seamless SSO, or writing logs.
+
+```powershell
+& $scriptPath `
+    -RollOverAccountUPN 'AzKrbRollOver@contoso.com' `
+    -WhatIf
+```
 
 For complete PowerShell help, run:
 
 ```powershell
-Get-Help .\azKerberosRollover.ps1 -Full
+Get-Help $scriptPath -Full
 ```
 
-## Logging
+## Monitoring
 
-The script writes:
+The script writes detailed execution information to:
 
-- All records to `<LogPath>\azKerberosRollover.ps1.log`.
-- Information, warning, and error records to the Windows Application event log.
-- A single rotated `.sav` log when the active log exceeds 1 MB.
+- `<LogPath>\azKerberosRollover.ps1.log`
+- The Windows Application event log with the source `AzureKrbRollOver`
 
-No log files, event sources, or Windows events are created or modified when `-WhatIf` is used.
+When `-LogPath` is not specified, the log file is written to `%LOCALAPPDATA%` of the account running the script. The active log is rotated to a single `.sav` file when it exceeds 1 MB.
 
-See the [event ID reference](EventID.md) for all event identifiers and messages.
+Read the latest entries from a configured log directory:
 
-## Return codes
+```powershell
+Get-Content 'C:\Logs\azKerberosRollover.ps1.log' -Tail 50
+```
 
-| Code | Meaning |
-| --- | --- |
-| `0x0` | The script completed successfully. |
-| `0x3EA` | The Windows Application event source could not be created. |
+Read recent Windows events generated by the script:
 
-## Scheduled execution
+```powershell
+Get-WinEvent -FilterHashtable @{
+    LogName      = 'Application'
+    ProviderName = 'AzureKrbRollOver'
+} -MaxEvents 20
+```
 
-Use Windows Task Scheduler for recurring rollovers. Microsoft recommends regularly rolling over the seamless SSO Kerberos decryption key.
+See the [event ID reference](EventID.md) for the events, severities, and messages written by the script.
 
-When configuring the task:
+> [!NOTE]
+> `-WhatIf` does not create or modify log files, event sources, or Windows events.
 
-1. Use an identity with the permissions listed in [Prerequisites](#prerequisites).
-2. Select **Run with highest privileges** if the event source has not been provisioned separately.
-3. Allow enough time for credential synchronization by configuring `-AzureSyncWaitTime` appropriately.
-4. Review the local and Windows Application event logs after each scheduled run.
+## Troubleshooting
 
-## Project resources
+Start troubleshooting by reviewing the local log file and the Windows Application events. Use the [event ID reference](EventID.md) to identify the failed stage and its meaning.
 
-| Resource | Description |
-| --- | --- |
-| [`azKerberosRollover.ps1`](azKerberosRollover.ps1) | Main rollover script and built-in PowerShell help. |
-| [Event ID reference](EventID.md) | Windows Application event identifiers and messages. |
-| [Changelog](CHANGELOG.md) | Release history and notable changes. |
-| [Developer guide](developer.md) | Contributor setup, branch workflow, versioning, and validation. |
+Confirm that all required PowerShell modules are available:
 
-## Development
+```powershell
+Get-Module -ListAvailable AzureADSSO, ActiveDirectory, ADSync
+```
 
-Contributions are welcome. See the [developer guide](developer.md) for repository setup, branch workflow, automatic versioning, changelog generation, and validation guidance.
+Run the read-only validation path:
+
+```powershell
+& "$env:ProgramFiles\AzKerberosRollOver\azKerberosRollover.ps1" `
+    -RollOverAccountUPN 'AzKrbRollOver@contoso.com' `
+    -WhatIf
+```
+
+Display the complete built-in help:
+
+```powershell
+Get-Help "$env:ProgramFiles\AzKerberosRollOver\azKerberosRollover.ps1" -Full
+```
+
+## Contributors
+
+AzKerberosRollOver is maintained by [Andreas Lucas (Kili69)](https://github.com/Kili69).
+
+Contributions, bug reports, and improvement suggestions are welcome through the [GitHub repository](https://github.com/Kili69/AzKerberosRollOver).
+
+## Developer information
+
+Repository setup, implementation details, versioning, Git hooks, contribution guidance, and validation procedures are documented in the [developer guide](developer.md).
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+AzKerberosRollOver is licensed under the [GNU General Public License v3.0](LICENSE).
