@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 0.1.20261008.2
+.VERSION 0.1.20261009.1
 .GUID 2efdf5d8-370e-425c-afad-e5951a84f893
 
 .AUTHOR Andreas Lucas [MSFT]
@@ -60,7 +60,8 @@ possibility of such damages
     4. Stops when the previous rollover is still within the configured TGT lifetime,
        unless IgnoreTGTLifetimeCheck is specified.
     5. Generates a new password and resets the on-premises rollover account.
-    6. Optionally starts an Entra Connect delta synchronization and waits for replication.
+    6. Optionally starts an Entra Connect delta synchronization and checks every
+       30 seconds for up to five minutes whether the new password is available.
     7. Runs the AzureADSSO forest update in a background job under the rollover account.
     8. Reads pwdLastSet from the PDC emulator to verify that the update succeeded.
 
@@ -68,6 +69,7 @@ possibility of such damages
     0x0    Success
     0x1    The rollover workflow terminated with an error.
     0x3EA  The Windows event source could not be created.
+    0x3EB  The worker account password was not synchronized within five minutes.
 
 .PARAMETER AzureADSSOModule
     Full path to AzureADSSO.psd1. The default is the standard Microsoft Entra Connect
@@ -81,9 +83,6 @@ possibility of such damages
 .PARAMETER LogPath
     Directory in which the debug log is written. A file path is reduced to its parent
     directory. Missing or invalid paths fall back to the current user's LOCALAPPDATA.
-.PARAMETER AzureSyncWaitTime
-    Number of seconds to wait after starting synchronization. Values are constrained
-    to 15 through 900 seconds by the runtime validation. The default is 60 seconds.
 .PARAMETER DoNotStartSync
     Skips Start-ADSyncSyncCycle. Use this when synchronization is started separately,
     for example when the account is synchronized by Microsoft Entra Cloud Sync.
@@ -103,10 +102,9 @@ possibility of such damages
 .EXAMPLE
     .\azKerberosRollover.ps1 -RollOverADAccountName 'SvcKrbRollover' `
         -RollOverAccountUPN 'SvcKrbRollover@contoso.com' `
-        -AzureSyncWaitTime 120 -LogPath 'C:\Logs'
+        -LogPath 'C:\Logs'
 
-    Uses a custom rollover account, waits two minutes for replication, and writes the
-    debug log under C:\Logs.
+    Uses a custom rollover account and writes the debug log under C:\Logs.
 .EXAMPLE
     .\azKerberosRollover.ps1 -DoNotStartSync -IgnoreTGTLifetimeCheck
 
@@ -136,8 +134,6 @@ param(
     [string]$RollOverAccountUPN,
     [Parameter(Mandatory=$false)]
     [string]$LogPath,
-    [Parameter	(Mandatory=$false)]
-    [int]$AzureSyncWaitTime = 60,
     [switch]$DoNotStartSync,
     [Parameter (Mandatory=$false)]
     [int]$TGTLifetimeHours = 10,
@@ -252,14 +248,14 @@ function Write-Log {
 #region Script Variables
 
 # Runtime identity and security settings used throughout the workflow.
-$ScriptVersion = "0.1.20261008.2"
+$ScriptVersion = "0.1.20261009.1"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"
 
-# Bounds are enforced at runtime so scheduled invocations cannot use unsafe delays.
-$AzSyncWaitTimeMin = 15
-$AzSyncWaitTimeMax = 900
+# Synchronization is checked at a fixed interval for a bounded period.
+$AzureSyncPollIntervalSeconds = 30
+$AzureSyncTimeoutSeconds = 300
 $TGTLifetimeHoursMin = 0
 $TGTLifetimeHoursMax = 24
 
@@ -327,7 +323,7 @@ else {
 }
 Write-Log -Message "The script started with $($MyInvocation.Line) - Process ID $($PID)" -Severity Debug -EventID 0
 Write-Log -Message "Current user $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Severity Debug -EventID 0 
-Write-Log -Message "Parameters: AzureADSSOModule: $AzureADSSOModule, RollOverADAccountName: $RollOverADAccountName, RollOverAccountUPN: $RollOverAccountUPN, LogPath: $LogPath, AzureSyncWaitTime: $AzureSyncWaitTime, DoNotStartSync: $DoNotStartSync, TGTLifetimeHours: $TGTLifetimeHours, IgnoreTGTLifetimeCheck: $IgnoreTGTLifetimeCheck, WhatIf: $script:IsWhatIf" -Severity Debug -EventID 0
+Write-Log -Message "Parameters: AzureADSSOModule: $AzureADSSOModule, RollOverADAccountName: $RollOverADAccountName, RollOverAccountUPN: $RollOverAccountUPN, LogPath: $LogPath, DoNotStartSync: $DoNotStartSync, TGTLifetimeHours: $TGTLifetimeHours, IgnoreTGTLifetimeCheck: $IgnoreTGTLifetimeCheck, WhatIf: $script:IsWhatIf" -Severity Debug -EventID 0
 
 
 $scriptExitCode = 0
@@ -351,16 +347,6 @@ Try {
 
     #endregion
     #region Validate runtime inputs
-    #region Validate synchronization wait time
-
-    if ($AzureSyncWaitTime -lt $AzSyncWaitTimeMin){
-            Write-log -Message "The azure wait time $AzSyncWaitTime seconds to synchronize the password is to low. It must be higher then $AzSyncWaitTimeMin seconds" -Severity Warning -EventID 3100
-            $AzSyncWaitTime = $AzSyncWaitTimeMin
-    } elseif ($AzureSyncWaitTime -gt $AzSyncWaitTimeMax){
-            Write-Log -Message -"the azure wait time $AzSynWaitTime seconds exceed the maximum value of $AzSyncWaitTimeMax seconds" -Severity Warning -EventID 3101
-            $AzSyncWaitTime = $AzSyncWaitTimeMax
-    }
-    #endregion 
     #region Validate TGT lifetime
     if ($TGTLifetimeHours -lt $TGTLifetimeHoursMin){
         Write-Log "The TGTLifeTime parameter is lower then $TGTLifeTimeHoursMin. Using $TGTLifeTimeHoursMin" -Severity Warning -EventID 3112
@@ -432,9 +418,70 @@ Try {
     } else {
         Write-Log -Message "Skip starting the Azure AD Sync" -Severity Debug -EventID 0
     }
-    # Allow the new credential to reach Microsoft Entra ID before authenticating with it.
-    Write-Log -Message "wait $AzureSyncWaitTime secondes for replication to complete..." -Severity Debug -EventID 0
-    Start-Sleep -Seconds $AzureSyncWaitTime
+    # Verify that the new credential has reached Microsoft Entra ID before updating seamless SSO.
+    $syncStartedAt = Get-Date
+    $syncDeadline = $syncStartedAt.AddSeconds($AzureSyncTimeoutSeconds)
+    $syncAttempt = 0
+    $passwordSynchronized = $false
+    while (-not $passwordSynchronized -and (Get-Date) -lt $syncDeadline) {
+        $syncAttempt++
+        $nextCheckAt = $syncStartedAt.AddSeconds($syncAttempt * $AzureSyncPollIntervalSeconds)
+        $waitSeconds = [Math]::Max(0, [Math]::Ceiling(($nextCheckAt - (Get-Date)).TotalSeconds))
+        if ($waitSeconds -gt 0) {
+            Write-Host "Waiting $waitSeconds seconds before checking password synchronization (attempt $syncAttempt)..." -ForegroundColor Cyan
+            Start-Sleep -Seconds $waitSeconds
+        }
+
+        Write-Host "Checking whether the updated password is available in Microsoft Entra ID (attempt $syncAttempt)..." -ForegroundColor Cyan
+        Write-Log -Message "Checking password synchronization for $RollOverAccountUPN (attempt $syncAttempt)" -Severity Debug -EventID 0
+
+        $syncCheckJob = $null
+        try {
+            $syncCheckJob = Start-Job -Credential $AdCredential -ScriptBlock {
+                param ($AzureADSSOModule, $RollOverAccountUPN, $secPwd)
+
+                $ErrorActionPreference = 'Stop'
+                Import-Module $AzureADSSOModule -Force
+                $securePassword = ConvertTo-SecureString $secPwd -AsPlainText -Force
+                $cloudCredential = New-Object System.Management.Automation.PSCredential (
+                    $RollOverAccountUPN,
+                    $securePassword
+                )
+                New-AzureADSSOAuthenticationContext -CloudCredentials $cloudCredential | Out-Null
+            } -ArgumentList $AzureADSSOModule, $RollOverAccountUPN, $secPwd
+
+            $completedJob = Wait-Job -Job $syncCheckJob -Timeout $AzureSyncPollIntervalSeconds
+            if (-not $completedJob) {
+                Stop-Job -Job $syncCheckJob
+                throw [System.TimeoutException] "The password synchronization check exceeded the remaining timeout"
+            }
+            if ($syncCheckJob.State -ne 'Completed') {
+                throw $syncCheckJob.ChildJobs[0].JobStateInfo.Reason
+            }
+            Receive-Job -Job $syncCheckJob -ErrorAction Stop | Out-Null
+            $passwordSynchronized = $true
+            Write-Host "The updated password is available in Microsoft Entra ID." -ForegroundColor Green
+            Write-Log -Message "The updated password for $RollOverAccountUPN is available in Microsoft Entra ID" -Severity Information -EventID 3003
+        }
+        catch {
+            Write-Host "The updated password is not available in Microsoft Entra ID yet." -ForegroundColor Yellow
+            Write-Log -Message "Password synchronization check failed on attempt $syncAttempt`: $($_.Exception.Message)" -Severity Debug -EventID 0
+        }
+        finally {
+            if ($syncCheckJob) {
+                Remove-Job -Job $syncCheckJob -Force
+            }
+        }
+    }
+
+    if (-not $passwordSynchronized) {
+        $scriptExitCode = 0x3EB
+        $message = "The updated password for $RollOverAccountUPN was not available in Microsoft Entra ID after five minutes"
+        Write-Host $message -ForegroundColor Red
+        Write-Log -Message $message -Severity Error -EventID 3114
+        throw [System.TimeoutException] $message
+    }
+
     #create temporary file for the new PowerShell process
     $PSShellTempFile = New-TemporaryFile
     #allow $ADUser write access to the temporary file
@@ -486,7 +533,7 @@ $ADSSResetJob | Remove-Job
     $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($Result.Properties.pwdlastset[0])
     Write-Log -Message "The AzureADSSOAcc computer account was last password reset at $AzureADSsoAccPwdLastSet (read from PDC emulator $PDCEmulator)" -Severity Debug -EventID 0
     if ($AzureADSsoAccPwdLastSet -gt (Get-Date).AddMinutes(-15)) {
-        Write-Log -Message "The AzureADSSOAcc computer account password was successfully updated at $AzureADSsoAccPwdLastSet" -Severity Information -EventID 3003
+        Write-Log -Message "The AzureADSSOAcc computer account password was successfully updated at $AzureADSsoAccPwdLastSet" -Severity Debug -EventID 0
     } else {
         Write-Log -Message "The AzureADSSOAcc computer account password was not updated. Last password set is $AzureADSsoAccPwdLastSet" -Severity Error -EventID 3108
         throw [System.InvalidOperationException] "The AzureADSSOAcc computer account password was not updated. Last password set is $AzureADSsoAccPwdLastSet"
@@ -494,7 +541,9 @@ $ADSSResetJob | Remove-Job
     Write-Log -Message "Successfully updated the Azure Kerberos object" -Severity Information -EventID 3004
 } 
 catch{
-    $scriptExitCode = 0x1
+    if ($scriptExitCode -eq 0) {
+        $scriptExitCode = 0x1
+    }
     Write-Log -Message "An error occurred:$($_.Exception.Message) $($_.InvocationInfo.PositionMessage)" -Severity Debug -EventID 0
     switch ($_.Exception){
         {$_ -is [System.InvalidOperationException]}{
@@ -519,6 +568,10 @@ catch{
         }
         {$_ -is [System.InvalidOperationException]}{
             Write-Log -Message "A Invalid operation error occurred: $($_)" -Severity Error -EventID 3198
+            break
+        }
+        {$_ -is [System.TimeoutException]}{
+            Write-Log -Message "Password synchronization timed out: $($_)" -Severity Debug -EventID 0
             break
         }
         {$_ -is [System.Management.Automation.CommandNotFoundException]}{

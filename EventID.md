@@ -12,8 +12,6 @@ This script writes events t the application log and to the Debuglog File. The fo
 |3006    | Information | Script finished successfully                                               |
 |3007    | Information | Impersonation account information                                          |
 |3008    | Warning     |Skipping the TGT lifetime check as the IgnoreTGTLifetimeCheck switch is set |
-|3100    | Warning     | The Azure Sync wait time is to low change to minimum value                 |
-|3101    | Warning     | The Azure Sync wait time it to high change to maximum value                |
 |3102    | Error       | A permission error occured while resetting the password                    |
 |3103    | Error       | Multifactor enforced for the reset account                                 |
 |3104    | Error       | Multifactor enforced for the reset account                                 |
@@ -26,6 +24,7 @@ This script writes events t the application log and to the Debuglog File. The fo
 |3111    | Error       | A Powershell Module is missing                                             |
 |3112    | Warning     | The TGT life time is below the minimum supported value                     |
 |3113    | Warning     | The TGT life time exceed the maximum supported value                       |
+|3114    | Error       | The worker account password was not synchronized within five minutes       |
 |3196    | Warning     | Script terminated with errors                                              |
 |3197    | Error       | Can not write to log file                                                  |
 |3198    | Error       | An invalid operation or authentication operation failed                    |

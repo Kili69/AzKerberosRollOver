@@ -94,6 +94,18 @@ The updater performs these steps:
 
 The update is idempotent for a pending version. Retrying a failed commit refreshes the existing changelog entry instead of appending a duplicate.
 
+## GitHub changelog validation
+
+The `Changelog` GitHub Actions workflow runs for every push and pull request. It validates every new commit in the pushed or proposed range and fails when:
+
+- The commit does not modify [`CHANGELOG.md`](CHANGELOG.md).
+- The script does not contain a supported version in `<major>.<minor>.<yyyyMMdd>.<counter>` format.
+- [`CHANGELOG.md`](CHANGELOG.md) has no release entry for the script version contained in that commit.
+
+The workflow does not modify repository history. If it fails, enable the repository Git hooks, recreate the affected commit, and push the corrected history.
+
+Configure **Verify changelog** as a required status check in the repository branch ruleset to prevent pull requests with missing changelog updates from being merged.
+
 ## Changelog generation
 
 Changelog entries describe files that were staged before the hook ran. Added, copied, deleted, modified, renamed, type-changed, and unmerged paths are represented explicitly.

@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.20261009.1] - 2026-10-09
+
+### Changed
+
+- Added: `.github/workflows/changelog.yml`
+- Modified: `EventID.md`
+- Modified: `README.md`
+- Modified: `azKerberosRollover.ps1`
+- Modified: `developer.md`
+- Added: `tools/Test-Changelog.ps1`
+
 ## [0.1.20261008.2] - 2026-10-08
 
 ### Changed
