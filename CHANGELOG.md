@@ -6,11 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.20261009.1] - 2026-10-09
+
+### Added
+
+- Temporarily enable the dedicated Active Directory rollover account immediately
+  before its password reset and always disable it again before script exit,
+  including after rollover failures, with both state changes verified against the
+  account's PDC emulator.
+- Preserve an already enabled rollover account through the startup check, while
+  enabling and verifying it only when the PDC reports that it is disabled.
+- Allow an already enabled rollover account to continue when the execution
+  principal lacks `userAccountControl` write access; the mandatory final disable
+  attempt then reports the missing permission explicitly.
+- Report an explicit missing `userAccountControl` permission error when the account
+  cannot be enabled or disabled.
+- Delegate and validate property-scoped `userAccountControl` write access for the
+  Entra Connect computer account so the SYSTEM task can manage the worker account
+  state without broader account permissions.
+- Added events `3009` and `3010` for enabling and disabling the rollover account.
+
 ### Fixed
 
 - Corrected the README branch badge and link to reference the default `main` branch.
 - Made the authenticated release workflow exit successfully without creating a
   duplicate when the current version already exists as a GitHub release.
+- Reset the daily build counter when deliberately moving to a new major or minor
+  release line.
+
+### Changed
+
+- Modified: `CHANGELOG.md`
+- Modified: `EVENTID.md`
+- Modified: `README.md`
+- Modified: `azKerberosRollover.ps1`
+- Modified: `development/Update-Version.ps1`
+- Modified: `tools/Set-AzKerberosRolloverPermissions.ps1`
 
 ## [1.0.20261009.12] - 2026-10-09
 
@@ -314,7 +345,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Added the initial script.
 
-[Unreleased]: https://github.com/Kili69/AzKerberosRollOver/compare/v1.0.20261009.12...HEAD
+[Unreleased]: https://github.com/Kili69/AzKerberosRollOver/compare/v1.1.20261009.1...HEAD
+[1.1.20261009.1]: https://github.com/Kili69/AzKerberosRollOver/releases/tag/v1.1.20261009.1
 [1.0.20261009.12]: https://github.com/Kili69/AzKerberosRollOver/releases/tag/v1.0.20261009.12
 [1.0.20261009.10]: https://github.com/Kili69/AzKerberosRollOver/releases/tag/v1.0.20261009.10
 [1.0.20261009.9]: https://github.com/Kili69/AzKerberosRollOver/releases/tag/v1.0.20261009.9

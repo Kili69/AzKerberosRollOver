@@ -9,7 +9,7 @@
   [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
   [![Microsoft Entra](https://img.shields.io/badge/Microsoft-Entra_ID-5C2D91?logo=microsoft&logoColor=white)](https://www.microsoft.com/security/business/identity-access/microsoft-entra-id)
   [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-  [![Version](https://img.shields.io/badge/version-1.0.20261009.12-2EA44F)](CHANGELOG.md)
+  [![Version](https://img.shields.io/badge/version-1.1.20261009.1-2EA44F)](CHANGELOG.md)
   [![Branch](https://img.shields.io/badge/branch-main-1F6FEB?logo=git&logoColor=white)](https://github.com/Kili69/AzKerberosRollOver/tree/main)
   <br>
   [![☕ Buy me a coffee](https://img.shields.io/badge/%E2%98%95-Buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/andreaslmuz)
@@ -46,7 +46,7 @@ AzKerberosRollOver is a PowerShell script that automates the password and Kerber
 
 The Microsoft procedure is designed as an interactive administrative workflow. An administrator imports the required modules, authenticates with Microsoft Entra and on-premises credentials, and runs `Update-AzureADSSOForest` for the target forest. AzKerberosRollOver turns these manual steps into a repeatable workflow that can also be scheduled and monitored.
 
-The script uses a synchronized hybrid identity as its rollover account. This account requires the delegated Active Directory permissions needed to update `AzureADSSOAcc` and the **Hybrid Identity Administrator** role in Microsoft Entra ID. During each run, the script generates a new strong random password for the rollover account, synchronizes the credential, and uses the account to run `Update-AzureADSSOForest`.
+The script uses a synchronized hybrid identity as its rollover account. This account requires the delegated Active Directory permissions needed to update `AzureADSSOAcc` and the **Hybrid Identity Administrator** role in Microsoft Entra ID. During each run, the script checks the account state on the PDC emulator, enables and verifies the account only when it is disabled, generates and synchronizes a new strong random password, uses the account to run `Update-AzureADSSOForest`, and disables it again before the script exits.
 
 > [!IMPORTANT]
 > No password for the rollover account is stored on disk or written to a log. The randomly generated password exists only in process memory while the script is running and is discarded when the process ends.
@@ -86,6 +86,8 @@ Create a dedicated Active Directory user account to act as the worker account fo
 
 - Must be synchronized to Microsoft Entra ID.
 - Must have a permanent assignment of the Microsoft Entra **Hybrid Identity Administrator** role.
+- Should remain disabled during normal operation. Version 1.1 enables it only for
+  the rollover workflow and disables it again before exit, including after errors.
 - Must be excluded from MFA requirements that apply to the noninteractive
   AzureADSSO authentication flow. The script cannot respond to an MFA prompt and
   terminates when MFA or a blocking Conditional Access requirement is detected.
@@ -193,8 +195,16 @@ performs these operations:
   the rollover user's domain.
 - Disables permission inheritance on the rollover user without preserving its old
   inherited or explicit access rules.
-- Grants only **Reset Password** on the rollover user to the Entra Connect computer
-  account.
+- Grants **Reset Password** and property-scoped write access to
+  `userAccountControl` on the rollover user to the Entra Connect computer account.
+  These rights allow the SYSTEM task to enable the account, reset its password, and
+  always disable it again before exit.
+
+If the account is already enabled, the rollover itself can proceed without
+`userAccountControl` write access. The script still attempts the mandatory final
+disable operation and terminates with an explicit permission error if that operation
+is denied. A disabled account without this permission is rejected before its
+password is changed.
 - Grants **Write** and **Reset Password** on `AzureADSSOAcc` to the
   rollover user.
 
@@ -464,7 +474,7 @@ The following errors can be written to the Windows Application event log. See th
 
 | Event ID | Error | Recommended action |
 | --- | --- | --- |
-| `3102` | Access was denied while resetting the worker account or running `Update-AzureADSSOForest`. | For password-reset failures, verify that the task runs as `SYSTEM` and that the Entra Connect server computer account has **Reset Password** on the protected worker account. For update failures after successful authentication, verify the worker account's **Hybrid Identity Administrator** role and its required Active Directory permissions on `AzureADSSOAcc`. |
+| `3102` | Access was denied while enabling, resetting, disabling, or using the worker account. | Verify that the task runs as `SYSTEM` and that the Entra Connect server computer account has **Reset Password** and property-scoped `userAccountControl` write access on the protected worker account. For update failures after successful authentication, verify the worker account's **Hybrid Identity Administrator** role and its required Active Directory permissions on `AzureADSSOAcc`. |
 | `3103` | Microsoft Entra authentication was blocked by an MFA or Conditional Access requirement. | Review the failed sign-in, per-user MFA, and the Conditional Access policies shown in the Microsoft Entra sign-in log. |
 | `3105` | The new worker account password is not available in Microsoft Entra ID. | Check Entra Connect synchronization health, password hash synchronization, and the worker account's synchronization scope. |
 | `3106` | `AzureADSSOAcc` could not be found through the Global Catalog. | Verify that seamless SSO is configured and that the Entra Connect server can contact a Global Catalog. |

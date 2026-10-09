@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 1.0.20261009.12
+.VERSION 1.1.20261009.1
 .GUID 2efdf5d8-370e-425c-afad-e5951a84f893
 
 .AUTHOR Andreas Lucas [MSFT]
@@ -52,13 +52,14 @@ AzureADSSO Module, ActiveDirectory Module
     3. Locates AzureADSSOAcc through a Global Catalog and checks its pwdLastSet value.
     4. Stops when the previous rollover is still within the configured TGT lifetime,
        unless IgnoreTGTLifetimeCheck is specified.
-    5. Generates a new password and resets the on-premises rollover account.
+    5. Enables the rollover account and resets it with a new generated password.
     6. Optionally starts an Entra Connect delta synchronization and checks every
        30 seconds for up to five minutes whether Microsoft Entra authentication
        succeeds with the new password.
     7. Runs the AzureADSSO forest update in a SYSTEM background job with explicit
        cloud and on-premises credentials for the rollover account.
     8. Reads pwdLastSet from the PDC emulator to verify that the update succeeded.
+    9. Disables the rollover account before the script exits, including after errors.
 
     Return codes:
     0x0    Success
@@ -486,11 +487,12 @@ function Write-Log {
 #region Script Variables
 
 # Runtime identity and security settings used throughout the workflow.
-$ScriptVersion = "1.0.20261009.12"
+$ScriptVersion = "1.1.20261009.1"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"
 $ResetPasswordExtendedRight = [Guid]'00299570-246d-11d0-a768-00aa006e0529'
+$UserAccountControlProperty = [Guid]'bf967a68-0de6-11d0-a285-00aa003049e2'
 
 # Synchronization is checked at a fixed interval for a bounded period.
 $AzureSyncPollIntervalSeconds = 30
@@ -584,6 +586,7 @@ $scriptExitCode = 0
 $scriptFailureMessage = $null
 $scriptWasDeclined = $false
 $rolloverCompleted = $false
+$rolloverAccountMustBeDisabled = $false
 
 Try {
     #region Import dependencies
@@ -741,7 +744,22 @@ Try {
         Write-Log -Message "$currentPrincipal does not have Reset Password permission on rollover account $ADUser" -Severity Error -EventID 3102
         throw [System.UnauthorizedAccessException] "$currentPrincipal can not reset the password of rollover account $ADUser"
     }
-    Write-Log -Message "$currentPrincipal has Reset Password permission on rollover account $ADUser" -Severity Debug -EventID 0
+    $canWriteRolloverAccountState = Test-ADObjectRight `
+        -DistinguishedName $RollOverADUser.DistinguishedName `
+        -PrincipalSids $currentPrincipalSids `
+        -RequiredRight ([System.DirectoryServices.ActiveDirectoryRights]::WriteProperty) `
+        -ObjectType $UserAccountControlProperty
+    $initialRolloverAccountState = Get-ADUser -Identity $RollOverADUser.DistinguishedName -Server $rollOverUserDomain.PDCEmulator -Properties Enabled -ErrorAction Stop
+    if (!$initialRolloverAccountState.Enabled -and !$canWriteRolloverAccountState) {
+        Write-Log -Message "$currentPrincipal does not have Write permission on userAccountControl for rollover account $ADUser" -Severity Error -EventID 3102
+        throw [System.UnauthorizedAccessException] "$currentPrincipal can not enable disabled rollover account $ADUser"
+    }
+    if ($canWriteRolloverAccountState) {
+        Write-Log -Message "$currentPrincipal has Reset Password and account-state permissions on rollover account $ADUser" -Severity Debug -EventID 0
+    }
+    else {
+        Write-Log -Message "Rollover account $ADUser is already enabled. Continuing without detected Write userAccountControl permission for $currentPrincipal; the final disable operation will report an error if the permission is unavailable" -Severity Debug -EventID 0
+    }
 
     # Read tokenGroups from the worker account's PDC to evaluate transitive group ACEs.
     $rollOverUserSecurity = Get-ADUser -Identity $RollOverADUser.DistinguishedName -Server $rollOverUserDomain.PDCEmulator -Properties tokenGroups, SID -ErrorAction Stop
@@ -812,30 +830,65 @@ Try {
         Write-Host 'WhatIf validation summary' -ForegroundColor Cyan
         Write-Host "  [PASS] Rollover account: $ADUser" -ForegroundColor Green
         Write-Host "  [PASS] Microsoft Entra UPN: $RollOverAccountUPN" -ForegroundColor Green
-        Write-Host "  [PASS] Execution principal $currentPrincipal can reset the rollover account password" -ForegroundColor Green
+        if ($canWriteRolloverAccountState) {
+            Write-Host "  [PASS] Execution principal $currentPrincipal can enable, reset, and disable the rollover account" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  [WARN] Rollover account is already enabled and can be reset, but $currentPrincipal lacks detected permission to disable it at the end" -ForegroundColor Yellow
+        }
         Write-Host "  [PASS] $ADUser can change and reset the password of $AzureADSSOAccName in $DomainName" -ForegroundColor Green
         Write-Host "  [PASS] TGT lifetime check: $tgtValidation" -ForegroundColor Green
         Write-Host ''
         Write-Host 'Planned actions' -ForegroundColor Cyan
-        Write-Host "  1. Generate a new $passwordSize-character password in process memory"
-        Write-Host "  2. Reset the password of $ADUser on $($rollOverUserDomain.PDCEmulator)"
-        Write-Host "  3. $syncPlan"
-        Write-Host "  4. Check every $AzureSyncPollIntervalSeconds seconds for up to $AzureSyncTimeoutSeconds seconds whether the new password is available in Microsoft Entra ID"
-        Write-Host "  5. Run Update-AzureADSSOForest as $ADUser"
-        Write-Host "  6. Verify the $AzureADSSOAccName password timestamp on the PDC emulator in $DomainName"
+        Write-Host "  1. Read the current Enabled state of $ADUser from $($rollOverUserDomain.PDCEmulator)"
+        Write-Host "  2. Enable and verify $ADUser only when it is currently disabled"
+        Write-Host "  3. Generate a new $passwordSize-character password in process memory"
+        Write-Host "  4. Reset the password of $ADUser on $($rollOverUserDomain.PDCEmulator)"
+        Write-Host "  5. $syncPlan"
+        Write-Host "  6. Check every $AzureSyncPollIntervalSeconds seconds for up to $AzureSyncTimeoutSeconds seconds whether the new password is available in Microsoft Entra ID"
+        Write-Host "  7. Run Update-AzureADSSOForest as $ADUser"
+        Write-Host "  8. Verify the $AzureADSSOAccName password timestamp on the PDC emulator in $DomainName"
+        Write-Host "  9. Disable $ADUser before the script exits"
         Write-Host ''
     }
 
     # One ShouldProcess boundary covers all dependent mutations so confirmation cannot
     # leave the workflow halfway through by approving individual steps separately.
     $rolloverTarget = "$RollOverADAccountName and $AzureADSSOAccName"
-    $rolloverAction = "Reset the rollover account password, synchronize it if enabled, and update the seamless SSO Kerberos key"
+    $rolloverAction = "Temporarily enable the rollover account, reset its password, update the seamless SSO Kerberos key, and disable the account"
     if (-not $PSCmdlet.ShouldProcess($rolloverTarget, $rolloverAction)) {
         if (!$script:IsWhatIf) {
             $scriptWasDeclined = $true
             Write-Log -Message "Rollover skipped because confirmation was declined" -Severity Information -EventID 3000
         }
         return
+    }
+
+    # Once the rollover starts, the account must be disabled again regardless of
+    # its initial state or any later failure.
+    $rolloverAccountMustBeDisabled = $true
+    $rolloverAccountState = Get-ADUser -Identity $RollOverADUser.DistinguishedName -Server $rollOverUserDomain.PDCEmulator -Properties Enabled -ErrorAction Stop
+    if ($rolloverAccountState.Enabled) {
+        Write-Log -Message "Kerberos RollOver Account $ADUser is already enabled; no enable operation is required" -Severity Debug -EventID 0
+    }
+    else {
+        try {
+            Enable-ADAccount -Identity $RollOverADUser.DistinguishedName -Server $rollOverUserDomain.PDCEmulator -ErrorAction Stop
+        }
+        catch {
+            $enableFailure = $_
+            if ($enableFailure.Exception -is [System.UnauthorizedAccessException] -or
+                $enableFailure.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::PermissionDenied) {
+                throw [System.UnauthorizedAccessException] "The disabled Kerberos RollOver Account $ADUser could not be enabled because $currentPrincipal lacks Write userAccountControl permission. Details: $($enableFailure.Exception.Message)"
+            }
+            throw [System.InvalidOperationException] "The disabled Kerberos RollOver Account $ADUser could not be enabled. Details: $($enableFailure.Exception.Message)"
+        }
+
+        $enabledRolloverAccount = Get-ADUser -Identity $RollOverADUser.DistinguishedName -Server $rollOverUserDomain.PDCEmulator -Properties Enabled -ErrorAction Stop
+        if (!$enabledRolloverAccount.Enabled) {
+            throw [System.InvalidOperationException] "The Kerberos RollOver Account $ADUser remained disabled after Enable-ADAccount"
+        }
+        Write-Log -Message "Enabled Kerberos RollOver Account: $ADUser" -Severity Information -EventID 3009
     }
 
     # Reset the synchronized identity before publishing the same secret to seamless SSO.
@@ -1108,7 +1161,7 @@ catch{
             break
         }
         {$_ -is [System.UnauthorizedAccessException] -or $caughtError.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::PermissionDenied}{
-            Write-log -Message "Access denied during the rollover: $scriptFailureMessage. Ensure $ADUser has the required Active Directory permissions and Microsoft Entra role." -Severity Error -EventID 3102
+            Write-log -Message "Access denied during the rollover: $scriptFailureMessage" -Severity Error -EventID 3102
             break
         }
         {$_ -is [System.ArgumentException]}{
@@ -1133,6 +1186,38 @@ catch{
     }
 }
 finally {
+    if ($rolloverAccountMustBeDisabled) {
+        try {
+            Disable-ADAccount -Identity $RollOverADUser.DistinguishedName -Server $rollOverUserDomain.PDCEmulator -ErrorAction Stop
+            $disabledRolloverAccount = Get-ADUser -Identity $RollOverADUser.DistinguishedName -Server $rollOverUserDomain.PDCEmulator -Properties Enabled -ErrorAction Stop
+            if ($disabledRolloverAccount.Enabled) {
+                throw [System.InvalidOperationException] "The account remained enabled after Disable-ADAccount"
+            }
+            Write-Log -Message "Disabled Kerberos RollOver Account: $ADUser" -Severity Information -EventID 3010
+        }
+        catch {
+            $disableFailureDetails = $_
+            $permissionFailure = (
+                $disableFailureDetails.Exception -is [System.UnauthorizedAccessException] -or
+                $disableFailureDetails.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::PermissionDenied
+            )
+            if ($permissionFailure) {
+                $disableFailureMessage = "The Kerberos RollOver Account $ADUser could not be disabled because $currentPrincipal lacks Write userAccountControl permission. Details: $($disableFailureDetails.Exception.Message)"
+            }
+            else {
+                $disableFailureMessage = "The Kerberos RollOver Account $ADUser could not be disabled. Verify Write userAccountControl permission for $currentPrincipal. Details: $($disableFailureDetails.Exception.Message)"
+            }
+            if ([string]::IsNullOrWhiteSpace($scriptFailureMessage)) {
+                $scriptFailureMessage = $disableFailureMessage
+            }
+            else {
+                $scriptFailureMessage = "$scriptFailureMessage. Cleanup error: $disableFailureMessage"
+            }
+            $scriptExitCode = 0x1
+            Write-Log -Message $disableFailureMessage -Severity Error -EventID 3102
+        }
+    }
+
     # The completion invariant prevents an early return or unexpected branch from
     # reporting success unless WhatIf/decline was intentional or rolloverCompleted
     # was set only after final PDC verification.

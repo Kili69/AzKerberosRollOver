@@ -6,7 +6,7 @@
 .DESCRIPTION
     Replaces the rollover user DACL with the current AdminSDHolder DACL from its
     domain, disables permission inheritance, and grants the Entra Connect computer
-    account Reset Password on the rollover user.
+    account Reset Password and Write userAccountControl on the rollover user.
 
     The rollover user also receives Write and Reset Password rights on the
     AzureADSSOAcc computer account. When the scheduled task runs as
@@ -61,6 +61,8 @@ param (
 
 # Schema-independent GUID of the Active Directory "Reset Password" control access right.
 $ResetPasswordExtendedRight = [Guid]'00299570-246d-11d0-a768-00aa006e0529'
+# Schema GUID of the userAccountControl attribute used to enable and disable the user.
+$UserAccountControlProperty = [Guid]'bf967a68-0de6-11d0-a285-00aa003049e2'
 $GlobalCatalogPort = 3268
 
 <#
@@ -204,7 +206,7 @@ function Resolve-ADComputerAccount {
 .DESCRIPTION
     Copies only the current access-control section of AdminSDHolder to the rollover
     user, disables inheritance without preserving the user's previous ACEs, and adds
-    Reset Password for the Entra Connect computer account.
+    Reset Password and Write userAccountControl for the Entra Connect computer account.
 
     This is a point-in-time DACL copy. It does not add the user to a protected group
     and does not cause SDProp to maintain the rollover user's permissions.
@@ -259,7 +261,8 @@ function Set-ADProtectedRolloverUserAcl {
         $targetAcl.SetAccessRuleProtection($true, $false)
 
         # A task running as local SYSTEM accesses AD as the Entra Connect computer
-        # account, so that computer SID receives the narrowly scoped reset right.
+        # account, so that computer SID receives narrowly scoped password-reset and
+        # account-state rights.
         $resetPasswordRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
             $ComputerSid,
             [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
@@ -267,12 +270,19 @@ function Set-ADProtectedRolloverUserAcl {
             $ResetPasswordExtendedRight
         )
         [void]$targetAcl.AddAccessRule($resetPasswordRule)
+        $accountStateRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+            $ComputerSid,
+            [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty,
+            [System.Security.AccessControl.AccessControlType]::Allow,
+            $UserAccountControlProperty
+        )
+        [void]$targetAcl.AddAccessRule($accountStateRule)
 
         $desiredDacl = $targetAcl.GetSecurityDescriptorSddlForm(
             [System.Security.AccessControl.AccessControlSections]::Access
         )
         if ($currentDacl -eq $desiredDacl) {
-            Write-Information "$TargetName already uses the AdminSDHolder DACL with Reset Password granted to $ComputerName" -InformationAction Continue
+            Write-Information "$TargetName already uses the AdminSDHolder DACL with Reset Password and Write userAccountControl granted to $ComputerName" -InformationAction Continue
             return
         }
 
@@ -281,7 +291,7 @@ function Set-ADProtectedRolloverUserAcl {
         if (!$applyChange) {
             $applyChange = $PSCmdlet.ShouldProcess(
                 $TargetName,
-                "Replace the DACL with AdminSDHolder permissions, disable inheritance, and grant Reset Password to $ComputerName"
+                "Replace the DACL with AdminSDHolder permissions, disable inheritance, and grant Reset Password plus Write userAccountControl to $ComputerName"
             )
         }
         if (!$applyChange) {
@@ -290,7 +300,7 @@ function Set-ADProtectedRolloverUserAcl {
 
         $targetEntry.ObjectSecurity = $targetAcl
         $targetEntry.CommitChanges()
-        Write-Information "Applied the AdminSDHolder DACL to $TargetName and granted Reset Password to $ComputerName" -InformationAction Continue
+        Write-Information "Applied the AdminSDHolder DACL to $TargetName and granted Reset Password plus Write userAccountControl to $ComputerName" -InformationAction Continue
     }
     finally {
         $adminSDHolderEntry.Dispose()

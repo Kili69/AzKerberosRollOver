@@ -12,6 +12,8 @@ This script writes events t the application log and to the Debuglog File. The fo
 |3006    | Information | Script finished successfully                                               |
 |3007    | Information | Impersonation account information                                          |
 |3008    | Warning     |Skipping the TGT lifetime check as the IgnoreTGTLifetimeCheck switch is set |
+|3009    | Information | The rollover account was enabled                                           |
+|3010    | Information | The rollover account was disabled                                          |
 |3102    | Error       | A required AD password permission is missing or access was denied          |
 |3103    | Error       | Microsoft Entra authentication was blocked by MFA or Conditional Access    |
 |3105    | Error       | Password Error, the password is not synced to Entra.ID                     |

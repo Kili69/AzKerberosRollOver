@@ -117,7 +117,12 @@ foreach ($revision in $parentRevisions) {
     }
 
     $parentVersion = Get-VersionMatch -Content ($parentContent -join "`n") -Source "${revision}:azKerberosRollover.ps1"
-    if ($parentVersion.Groups['date'].Value -eq $date -and $parentVersion.Groups['counter'].Success) {
+    # A deliberate major/minor change starts a new counter sequence even on the
+    # same day; only parent versions in the active release line affect the counter.
+    if ($parentVersion.Groups['major'].Value -eq $workingVersion.Groups['major'].Value -and
+        $parentVersion.Groups['minor'].Value -eq $workingVersion.Groups['minor'].Value -and
+        $parentVersion.Groups['date'].Value -eq $date -and
+        $parentVersion.Groups['counter'].Success) {
         # Selecting the maximum prevents a merge from reusing either parent's version.
         $counter = [Math]::Max($counter, [int]$parentVersion.Groups['counter'].Value + 1)
     }
