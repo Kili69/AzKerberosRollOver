@@ -92,6 +92,14 @@ $workingVersion = Get-VersionMatch -Content $scriptContent -Source $scriptPath
 $date = Get-Date -Format 'yyyyMMdd'
 $counter = 1
 
+# Preserve a deliberately advanced same-day working counter. This keeps manually
+# distributed development builds distinguishable while remaining idempotent when
+# the hook is retried for the same pending version.
+if ($workingVersion.Groups['date'].Value -eq $date -and
+    $workingVersion.Groups['counter'].Success) {
+    $counter = [Math]::Max($counter, [int]$workingVersion.Groups['counter'].Value)
+}
+
 # HEAD is the parent for a regular commit. During a merge, MERGE_HEAD contains
 # the additional parent revisions whose counters must also be considered.
 $parentRevisions = @('HEAD')

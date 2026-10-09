@@ -23,7 +23,7 @@ This script writes events t the application log and to the Debuglog File. The fo
 |3111    | Error       | A Powershell Module is missing                                             |
 |3112    | Warning     | The TGT life time is below the minimum supported value                     |
 |3113    | Warning     | The TGT life time exceed the maximum supported value                       |
-|3114    | Error       | The worker account password was not synchronized within five minutes       |
+|3114    | Error       | Microsoft Entra authentication with the updated password could not be verified within five minutes |
 |3196    | Warning     | Script terminated with errors                                              |
 |3197    | Error       | Can not write to log file                                                  |
 |3198    | Error       | An invalid operation or authentication operation failed                    |

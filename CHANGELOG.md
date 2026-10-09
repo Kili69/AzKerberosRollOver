@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.20261009.12] - 2026-10-09
+
+### Fixed
+
+- Resolved the Entra Connect server computer by distinguished name before reading
+  `tokenGroups`, ensuring the SYSTEM permission preflight uses the LDAP base search
+  required for this constructed Active Directory attribute.
+- Preserved structured authentication results and complete background-job diagnostics
+  so job error-stream records no longer hide the underlying Microsoft Entra error or
+  incorrectly prove that password synchronization failed.
+- Restored SYSTEM background jobs with explicit AzureADSSO cloud and on-premises
+  credentials because Windows does not support the alternate-credential process
+  creation used by credentialed background jobs when the caller is LocalSystem.
+- Removed the unnecessary alternate-logon service and local-rights preflight; the
+  dedicated worker account requires neither local nor batch logon rights.
+- Preserved an explicitly advanced same-day working version so repeated development
+  builds remain distinguishable before they are committed.
+- Changed log-file timestamps to UTC in ISO 8601 format for easier correlation with
+  Microsoft Entra sign-in logs.
+- Replaced the 15-minute freshness check with a strict `AzureADSSOAcc` `pwdLastSet`
+  comparison against the value saved before the rollover, using the same PDC
+  emulator for both reads.
+
+### Changed
+
+- Modified: `CHANGELOG.md`
+- Modified: `EVENTID.md`
+- Modified: `README.md`
+- Modified: `azKerberosRollover.ps1`
+
+
 
 ## [1.0.20261009.10] - 2026-10-09
 
@@ -277,7 +308,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Added the initial script.
 
-[Unreleased]: https://github.com/Kili69/AzKerberosRollOver/compare/v1.0.20261009.10...HEAD
+[Unreleased]: https://github.com/Kili69/AzKerberosRollOver/compare/v1.0.20261009.12...HEAD
+[1.0.20261009.12]: https://github.com/Kili69/AzKerberosRollOver/releases/tag/v1.0.20261009.12
 [1.0.20261009.10]: https://github.com/Kili69/AzKerberosRollOver/releases/tag/v1.0.20261009.10
 [1.0.20261009.9]: https://github.com/Kili69/AzKerberosRollOver/releases/tag/v1.0.20261009.9
 [0.1.20261008.2]: https://github.com/Kili69/AzKerberosRollOver/commit/55cca79077179e307f13cc95efac04f50a8a76c4

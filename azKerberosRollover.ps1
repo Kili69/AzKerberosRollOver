@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 1.0.20261009.10
+.VERSION 1.0.20261009.12
 .GUID 2efdf5d8-370e-425c-afad-e5951a84f893
 
 .AUTHOR Andreas Lucas [MSFT]
@@ -8,23 +8,23 @@
 .COPYRIGHT
 Copyright (c) 2021-2026 Andreas Lucas. Licensed under the MIT License.
 
-.TAGS 
+.TAGS
 Azure, Active Directory, Kerberos, RollOver, Hybrid
-.LICENSEURI 
+.LICENSEURI
 
-.PROJECTURI 
+.PROJECTURI
 https://github.com/Kili69/AzKerberosRollOver
 
 .DESCRIPTION
 Rolls over the Microsoft Entra seamless SSO Kerberos decryption key.
 
-.ICONURI 
+.ICONURI
 
-.EXTERNALMODULEDEPENDENCIES 
+.EXTERNALMODULEDEPENDENCIES
 
-.REQUIREDSCRIPTS 
+.REQUIREDSCRIPTS
 
-.EXTERNALSCRIPTDEPENDENCIES 
+.EXTERNALSCRIPTDEPENDENCIES
 AzureADSSO Module, ActiveDirectory Module
 
 .RELEASENOTES
@@ -54,14 +54,16 @@ AzureADSSO Module, ActiveDirectory Module
        unless IgnoreTGTLifetimeCheck is specified.
     5. Generates a new password and resets the on-premises rollover account.
     6. Optionally starts an Entra Connect delta synchronization and checks every
-       30 seconds for up to five minutes whether the new password is available.
-    7. Runs the AzureADSSO forest update in a background job under the rollover account.
+       30 seconds for up to five minutes whether Microsoft Entra authentication
+       succeeds with the new password.
+    7. Runs the AzureADSSO forest update in a SYSTEM background job with explicit
+       cloud and on-premises credentials for the rollover account.
     8. Reads pwdLastSet from the PDC emulator to verify that the update succeeded.
 
     Return codes:
     0x0    Success
     0x3EA  The Windows event source could not be created.
-    0x3EB  The worker account password was not synchronized within five minutes.
+    0x3EB  Microsoft Entra authentication with the new password could not be verified.
     0x3EC  Microsoft Entra authentication was blocked by MFA or Conditional Access.
     0x1    The rollover workflow terminated with another error.
 .PARAMETER AzureADSSOModule
@@ -298,6 +300,124 @@ function Get-EntraAuthenticationFailureCategory {
 }
 <#
 .SYNOPSIS
+    Extracts actionable diagnostics from a PowerShell background job.
+.DESCRIPTION
+    Combines errors returned by Receive-Job, errors retained by the child job,
+    the job-state exception, nested exception messages, ErrorDetails, and the
+    fully qualified error identifier into one deduplicated message.
+.PARAMETER ErrorRecords
+    Error records captured while receiving job output.
+.PARAMETER Job
+    The background job whose retained errors and failure reason are inspected.
+.OUTPUTS
+    System.String
+#>
+function Get-BackgroundJobErrorMessage {
+    param (
+        [System.Collections.IEnumerable]$ErrorRecords,
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Job]$Job
+    )
+
+    $messages = [System.Collections.Generic.List[string]]::new()
+    $records = @()
+    if ($ErrorRecords) {
+        $records += @($ErrorRecords)
+    }
+    foreach ($childJob in $Job.ChildJobs) {
+        $records += @($childJob.Error)
+    }
+
+    foreach ($record in $records) {
+        if ($record -is [System.Management.Automation.ErrorRecord]) {
+            if ($record.ErrorDetails -and $record.ErrorDetails.Message) {
+                [void]$messages.Add($record.ErrorDetails.Message)
+            }
+            if ($record.Exception) {
+                $exception = $record.Exception
+                while ($exception) {
+                    if ($exception.Message) {
+                        [void]$messages.Add($exception.Message)
+                    }
+                    $exception = $exception.InnerException
+                }
+            }
+            if ($record.FullyQualifiedErrorId) {
+                [void]$messages.Add("Error ID: $($record.FullyQualifiedErrorId)")
+            }
+        }
+
+        $recordText = $record.ToString()
+        if ($recordText) {
+            [void]$messages.Add($recordText)
+        }
+    }
+
+    foreach ($childJob in $Job.ChildJobs) {
+        $reason = $childJob.JobStateInfo.Reason
+        while ($reason) {
+            if ($reason.Message) {
+                [void]$messages.Add($reason.Message)
+            }
+            $reason = $reason.InnerException
+        }
+    }
+
+    $uniqueMessages = @(
+        $messages |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Select-Object -Unique
+    )
+    if ($uniqueMessages.Count -eq 0) {
+        return "The background job returned no diagnostic details (state: $($Job.State))"
+    }
+
+    return $uniqueMessages -join ' | '
+}
+<#
+.SYNOPSIS
+    Reads the AzureADSSOAcc password timestamp directly from a domain controller.
+.DESCRIPTION
+    Uses LDAP instead of AD Web Services so both validation reads come from the
+    same PDC emulator without stale AD Web Services cache data.
+.PARAMETER ComputerName
+    The sAMAccountName without the trailing dollar sign.
+.PARAMETER Server
+    The domain controller used for the LDAP query.
+.OUTPUTS
+    System.DateTime in UTC.
+#>
+function Get-AzureADSSOAccPasswordLastSet {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ComputerName,
+        [Parameter(Mandatory = $true)]
+        [string]$Server
+    )
+
+    $ldapRoot = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$Server")
+    $searcher = New-Object System.DirectoryServices.DirectorySearcher
+    $searcher.SearchRoot = $ldapRoot
+    try {
+        # This is an LDAP filter, not a regex: & combines both clauses,
+        # objectClass limits the result to computers, and the escaped PowerShell
+        # dollar appends the literal suffix of a computer sAMAccountName.
+        $searcher.Filter = "(&(objectClass=computer)(sAMAccountName=$ComputerName`$))"
+        $searcher.PropertiesToLoad.Add('pwdLastSet') | Out-Null
+        $result = $searcher.FindOne()
+        if (!$result -or $result.Properties.pwdlastset.Count -eq 0) {
+            throw [System.InvalidOperationException] "Could not read pwdLastSet for $ComputerName from PDC emulator $Server"
+        }
+
+        return [DateTime]::FromFileTimeUtc([Int64]$result.Properties.pwdlastset[0])
+    }
+    finally {
+        $searcher.Dispose()
+        $ldapRoot.Dispose()
+    }
+}
+<#
+.SYNOPSIS
     Writes a consistently formatted diagnostic record.
 .DESCRIPTION
     Writes every message to the debug log and debug stream. Information, warning, and
@@ -330,7 +450,7 @@ function Write-Log {
 
 
     # The CSV-like line includes enough context to correlate concurrent executions.
-    $LogLine = "$(Get-Date -Format o),$($PID), [$Severity],[$EventID], $Message"
+    $LogLine = "$([DateTimeOffset]::UtcNow.ToString('o')),$($PID), [$Severity],[$EventID], $Message"
     Write-Debug -Message $LogLine
     if (-not $script:IsWhatIf) {
         Add-Content -Path $LogFile -Value $LogLine -Force
@@ -338,20 +458,20 @@ function Write-Log {
 
     # Debug entries remain file-only; operational severities are also surfaced to Windows.
     switch ($Severity) {
-        'Error' { 
+        'Error' {
             Write-Host $Message -ForegroundColor Red
             if (-not $script:IsWhatIf) {
                 Add-Content -Path $LogFile -Value $Error[0].ScriptStackTrace
                 Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Error -Message $Message
             }
         }
-        'Warning' { 
+        'Warning' {
             Write-Host $Message -ForegroundColor Yellow
             if (-not $script:IsWhatIf) {
                 Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Warning -Message $Message
             }
         }
-        'Information' { 
+        'Information' {
             Write-Host $Message
             if (-not $script:IsWhatIf) {
                 Write-EventLog -LogName $eventLog -source $source -EventId $EventID -EntryType Information -Message $Message
@@ -366,7 +486,7 @@ function Write-Log {
 #region Script Variables
 
 # Runtime identity and security settings used throughout the workflow.
-$ScriptVersion = "1.0.20261009.10"
+$ScriptVersion = "1.0.20261009.12"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"
@@ -386,7 +506,7 @@ $AzureADSSOAccName = "AzureADSSOAcc"
 #endregion
 
 ######################################################
-# Main Script Logic 
+# Main Script Logic
 ######################################################
 
 #region Manage log file
@@ -411,7 +531,7 @@ if ($LogPath -eq ""){
 $LogFile = "$LogPath\$(if($psise) {[System.IO.Path]::GetFileNameWithoutExtension($psise.CurrentFile.FullPath)} else {$MyInvocation.MyCommand}).log"
 Write-Verbose "Log file: $LogFile"
 
-try {   
+try {
     # Event source creation requires administrative rights.
     if (-not $script:IsWhatIf -and -not [System.Diagnostics.EventLog]::SourceExists($source)) {
         Write-Verbose "Creating event source $source in log $eventLog"
@@ -425,7 +545,7 @@ catch {
     $eventSourceError = "The event source $source could not be created. The script $($MyInvocation.MyCommand) is terminated. Please run the script with elevated privileges or create the event source $source manually. Error: $($_.Exception.Message)"
     Write-Host "ERROR: $eventSourceError" -ForegroundColor Red
     try {
-        $logLine = "$(Get-Date -Format o),$($PID), [Error],[1002], $eventSourceError"
+        $logLine = "$([DateTimeOffset]::UtcNow.ToString('o')),$($PID), [Error],[1002], $eventSourceError"
         Add-Content -Path $LogFile -Value $logLine -Force -ErrorAction Stop
     }
     catch {
@@ -443,10 +563,10 @@ if (-not $script:IsWhatIf -and (Test-Path $LogFile)){
         }
         Rename-Item -Path $LogFile -NewName "$logFile.sav"
     }
-} 
+}
 #endregion
 
-Write-Log "=========================================" -Severity Debug -EventID 0 
+Write-Log "=========================================" -Severity Debug -EventID 0
 Write-Log "Script version $ScriptVersion" -Severity Debug -EventID 0
 if ($script:IsWhatIf) {
     Write-Log "Running as $($env:USERNAME) in WhatIf mode; file and event logging are disabled" -Severity Information -EventID 3000
@@ -455,7 +575,7 @@ else {
     Write-Log "Running as $($env:USERNAME). Debug log: $LogFile" -Severity Information -EventID 3000
 }
 Write-Log -Message "The script started with $($MyInvocation.Line) - Process ID $($PID)" -Severity Debug -EventID 0
-Write-Log -Message "Current user $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Severity Debug -EventID 0 
+Write-Log -Message "Current user $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Severity Debug -EventID 0
 Write-Log -Message "Parameters: AzureADSSOModule: $AzureADSSOModule, RollOverADAccountName: $RollOverADAccountName, RollOverAccountUPN: $RollOverAccountUPN, LogPath: $LogPath, StartEntraConnectSync: $StartEntraConnectSync, TGTLifetimeHours: $TGTLifetimeHours, IgnoreTGTLifetimeCheck: $IgnoreTGTLifetimeCheck, Verbose: $($VerbosePreference -eq 'Continue'), WhatIf: $script:IsWhatIf" -Severity Debug -EventID 0
 
 # These state variables let the final block distinguish success, WhatIf, declined
@@ -544,7 +664,7 @@ Try {
 #endregion
 #endregion
 
-    
+
     # Prefer the directory value so callers only need to supply a UPN when it differs.
     if (!$RollOverAccountUPN) {
         $RollOverAccountUPN = $RollOverADUser.UserPrincipalName
@@ -565,8 +685,10 @@ Try {
     # Regex: [^/]+ matches one or more characters that are not a slash. Because
     # -match returns the first match, $Matches[0] is the leading DNS domain.
     $gcAzureADSsoAcc.CanonicalName -match "[^/]+" |Out-Null
-    $DomainName = $matches[0] 
-    $AzureADSsoAcc = Get-ADcomputer -Filter {Name -eq $AzureADSSOAccName} -server $DomainName -Properties pwdLastSet
+    $DomainName = $matches[0]
+    $AzureADSSODomain = Get-ADDomain -Identity $DomainName -ErrorAction Stop
+    $PDCEmulator = $AzureADSSODomain.PDCEmulator
+    $AzureADSsoAcc = Get-ADcomputer -Filter {Name -eq $AzureADSSOAccName} -Server $PDCEmulator
 
     # Validate both security contexts before changing the rollover account password:
     # the executing identity must reset the worker password, and the worker identity
@@ -574,9 +696,12 @@ Try {
     $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     if ($currentIdentity.IsSystem) {
         # Local SYSTEM authenticates to remote AD services as the server computer.
-        # tokenGroups supplies the computer's transitive security-group SIDs.
+        # Resolve the sAMAccountName first without tokenGroups. The constructed
+        # tokenGroups attribute is available only through an LDAP base search, so
+        # the second lookup uses the resolved distinguished name as its identity.
         $localComputerDomain = Get-ADDomain -ErrorAction Stop
-        $localComputer = Get-ADComputer -Identity "$env:COMPUTERNAME`$" -Server $localComputerDomain.PDCEmulator -Properties SID, tokenGroups -ErrorAction Stop
+        $localComputerReference = Get-ADComputer -Identity "$env:COMPUTERNAME`$" -Server $localComputerDomain.PDCEmulator -ErrorAction Stop
+        $localComputer = Get-ADComputer -Identity $localComputerReference.DistinguishedName -Server $localComputerDomain.PDCEmulator -Properties SID, tokenGroups -ErrorAction Stop
         $currentPrincipal = "$($localComputerDomain.NetBIOSName)\$($localComputer.SamAccountName)"
         $currentPrincipalSids = @($localComputer.SID.Value)
         foreach ($tokenGroup in $localComputer.tokenGroups) {
@@ -653,22 +778,23 @@ Try {
     }
     Write-Log -Message "$ADUser has Write and Reset Password permissions on $AzureADSSOAccName" -Severity Debug -EventID 0
 
-    $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($AzureADSsoAcc.pwdLastSet)
-    Write-Log -Message "The AzureADSSOAcc computer account was last password reset at $AzureADSsoAccPwdLastSet" -Severity Debug -EventID 0
+    $AzureADSsoAccPwdLastSetBefore = Get-AzureADSSOAccPasswordLastSet -ComputerName $AzureADSSOAccName -Server $PDCEmulator
+    $AzureADSsoAccPwdLastSetBeforeText = $AzureADSsoAccPwdLastSetBefore.ToString('o')
+    Write-Log -Message "The AzureADSSOAcc computer account password timestamp before rollover is $AzureADSsoAccPwdLastSetBeforeText UTC (read from PDC emulator $PDCEmulator)" -Severity Debug -EventID 0
     # Avoid invalidating Kerberos tickets that may still be active from the last rollover.
     if ($IgnoreTGTLifetimeCheck){
         Write-Log -Message "Skipping the TGT lifetime check as the IgnoreTGTLifetimeCheck switch is set" -Severity Warning -EventID 3008
     } else {
-        if (((Get-Date) - $AzureADSsoAccPwdLastSet).Totalhours -le $TGTLifetimeHours) {
-            Write-Log -Message "The AzureADSSOAcc last password reset at $AzureADSsoAccPwdLastSet does not exceed the current TGT lifetime of $TGTLifetimeHours hours" -Severity Warning -EventID 3107
-            throw [System.InvalidOperationException] "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSet does not expired the TGT lifetime"
+        if (([DateTime]::UtcNow - $AzureADSsoAccPwdLastSetBefore).Totalhours -le $TGTLifetimeHours) {
+            Write-Log -Message "The AzureADSSOAcc last password reset at $AzureADSsoAccPwdLastSetBeforeText UTC does not exceed the current TGT lifetime of $TGTLifetimeHours hours" -Severity Warning -EventID 3107
+            throw [System.InvalidOperationException] "The AzureADSSOAcc password last set is $AzureADSsoAccPwdLastSetBeforeText UTC and does not exceed the TGT lifetime"
         }
     }
-    
+
     # WhatIf still performs every read-only discovery and permission check, then
     # presents the exact mutations that ShouldProcess will suppress.
     if ($script:IsWhatIf) {
-        $passwordAgeHours = [Math]::Round(((Get-Date) - $AzureADSsoAccPwdLastSet).TotalHours, 2)
+        $passwordAgeHours = [Math]::Round(([DateTime]::UtcNow - $AzureADSsoAccPwdLastSetBefore).TotalHours, 2)
         $tgtValidation = if ($IgnoreTGTLifetimeCheck) {
             'Bypassed by IgnoreTGTLifetimeCheck'
         }
@@ -716,10 +842,9 @@ Try {
     # The plaintext exists only in process/job memory because the AD and AzureADSSO
     # APIs both require credentials derived from the same newly generated secret.
     Write-Log -Message "Generate a new random password for the Kerberos RollOver Account" -Severity Debug -EventID 0
-    $secPwd = New-RandomPassword -length $passwordSize 
+    $secPwd = New-RandomPassword -length $passwordSize
     Set-ADAccountPassword -Identity $RollOverADUser.DistinguishedName -Server $rollOverUserDomain.PDCEmulator -NewPassword (ConvertTo-SecureString $secPwd -AsPlainText -Force) -Reset -ErrorAction Stop
     Write-Log -Message "Password for Kerberos RollOver Account $ADUser has been reset" -Severity Debug -EventID 0
-    [pscredential]$AdCredential = New-Object System.Management.Automation.PSCredential ($ADuser, (ConvertTo-SecureString $secPwd -AsPlainText -Force))
     Write-Log -Message "Reset Password for Kerberos RollOver Account: $ADUser" -Severity Information -EventID 3001
     if ($StartEntraConnectSync) {
         Write-Log -Message "Starting Entra Connect delta synchronization" -Severity Information -EventID 3002
@@ -733,6 +858,7 @@ Try {
     $syncDeadline = $syncStartedAt.AddSeconds($AzureSyncTimeoutSeconds)
     $syncAttempt = 0
     $passwordSynchronized = $false
+    $lastPasswordSyncFailure = $null
     while (-not $passwordSynchronized -and (Get-Date) -lt $syncDeadline) {
         $syncAttempt++
         # Anchor retries to the original start time so job overhead does not accumulate
@@ -749,9 +875,11 @@ Try {
 
         $syncCheckJob = $null
         try {
-            # Running under the worker credential validates both the new on-premises
-            # password and the noninteractive cloud authentication path used later.
-            $syncCheckJob = Start-Job -Credential $AdCredential -ScriptBlock {
+            # Keep the child process in the scheduled task's SYSTEM context. Windows
+            # does not support alternate-credential process creation when the caller
+            # is LocalSystem. The AzureADSSO cmdlet receives the worker credential
+            # explicitly instead.
+            $syncCheckJob = Start-Job -ScriptBlock {
                 param ($AzureADSSOModule, $RollOverAccountUPN, $secPwd)
 
                 $ErrorActionPreference = 'Stop'
@@ -771,15 +899,28 @@ Try {
                 catch {
                     # Preserve the complete inner-exception chain because WS-Trust and
                     # MSAL often place the actionable AADSTS detail below the top level.
-                    $errorMessages = @($_.Exception.Message)
-                    $innerException = $_.Exception.InnerException
-                    while ($innerException) {
-                        $errorMessages += $innerException.Message
-                        $innerException = $innerException.InnerException
+                    $errorMessages = @()
+                    if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                        $errorMessages += $_.ErrorDetails.Message
+                    }
+                    $exception = $_.Exception
+                    while ($exception) {
+                        if ($exception.Message) {
+                            $errorMessages += $exception.Message
+                        }
+                        $exception = $exception.InnerException
+                    }
+                    if ($_.CategoryInfo) {
+                        $errorMessages += $_.CategoryInfo.ToString()
+                    }
+                    if ($_.FullyQualifiedErrorId) {
+                        $errorMessages += "Error ID: $($_.FullyQualifiedErrorId)"
                     }
                     [pscustomobject]@{
                         Success = $false
-                        ErrorMessage = ($errorMessages -join ' | ')
+                        ErrorMessage = (($errorMessages |
+                            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                            Select-Object -Unique) -join ' | ')
                     }
                 }
             } -ArgumentList $AzureADSSOModule, $RollOverAccountUPN, $secPwd
@@ -792,17 +933,36 @@ Try {
                 throw [System.TimeoutException] "The password synchronization check exceeded the remaining timeout"
             }
             if ($syncCheckJob.State -ne 'Completed') {
-                throw $syncCheckJob.ChildJobs[0].JobStateInfo.Reason
+                $jobFailureMessage = Get-BackgroundJobErrorMessage -Job $syncCheckJob
+                throw [System.InvalidOperationException] "The password synchronization authentication job ended in state $($syncCheckJob.State). Details: $jobFailureMessage"
             }
-            $authenticationResult = Receive-Job -Job $syncCheckJob -ErrorAction Stop
+
+            # Receive output and errors separately. -ErrorAction Stop would discard
+            # the structured result as soon as the job error stream contains a record.
+            $syncJobErrors = @()
+            $syncJobOutput = @(Receive-Job -Job $syncCheckJob -ErrorVariable syncJobErrors -ErrorAction SilentlyContinue)
+            $authenticationResult = @(
+                $syncJobOutput |
+                    Where-Object { $null -ne $_.PSObject.Properties['Success'] }
+            ) | Select-Object -Last 1
+            if (!$authenticationResult) {
+                $jobFailureMessage = Get-BackgroundJobErrorMessage -ErrorRecords $syncJobErrors -Job $syncCheckJob
+                throw [System.InvalidOperationException] "The password synchronization authentication job returned no result. Details: $jobFailureMessage"
+            }
+
             if (!$authenticationResult.Success) {
-                $failureCategory = Get-EntraAuthenticationFailureCategory -Message $authenticationResult.ErrorMessage
+                $authenticationErrorMessage = [string]$authenticationResult.ErrorMessage
+                if ([string]::IsNullOrWhiteSpace($authenticationErrorMessage)) {
+                    $authenticationErrorMessage = Get-BackgroundJobErrorMessage -ErrorRecords $syncJobErrors -Job $syncCheckJob
+                }
+                $lastPasswordSyncFailure = $authenticationErrorMessage
+                $failureCategory = Get-EntraAuthenticationFailureCategory -Message $authenticationErrorMessage
                 # Policy blocks are deterministic and terminate immediately. Rejected
                 # credentials remain retryable because synchronization can still be pending.
                 switch ($failureCategory) {
                     'AuthenticationPolicyBlocked' {
                         $scriptExitCode = 0x3EC
-                        throw [System.Security.Authentication.AuthenticationException] "Microsoft Entra authentication for $RollOverAccountUPN was blocked by an MFA or Conditional Access requirement. The noninteractive rollover can not continue. Review the failed sign-in, per-user MFA, and the applied Conditional Access policies. Details: $($authenticationResult.ErrorMessage)"
+                        throw [System.Security.Authentication.AuthenticationException] "Microsoft Entra authentication for $RollOverAccountUPN was blocked by an MFA or Conditional Access requirement. The noninteractive rollover can not continue. Review the failed sign-in, per-user MFA, and the applied Conditional Access policies. Details: $authenticationErrorMessage"
                     }
                     'InvalidCredentials' {
                         Write-Host "Microsoft Entra rejected the updated credentials. The new password may not be synchronized yet; no explicit MFA or Conditional Access error code was returned." -ForegroundColor Yellow
@@ -811,10 +971,14 @@ Try {
                         Write-Host "Microsoft Entra authentication failed without a recognized MFA or Conditional Access error code. The check will be retried." -ForegroundColor Yellow
                     }
                 }
-                Write-Log -Message "Password synchronization check failed on attempt $syncAttempt ($failureCategory): $($authenticationResult.ErrorMessage)" -Severity Debug -EventID 0
+                Write-Log -Message "Password synchronization check failed on attempt $syncAttempt ($failureCategory): $authenticationErrorMessage" -Severity Debug -EventID 0
                 continue
             }
 
+            if ($syncJobErrors.Count -gt 0) {
+                $jobWarningMessage = Get-BackgroundJobErrorMessage -ErrorRecords $syncJobErrors -Job $syncCheckJob
+                Write-Log -Message "The successful authentication job also wrote diagnostic records: $jobWarningMessage" -Severity Debug -EventID 0
+            }
             $passwordSynchronized = $true
             Write-Host "The updated password is available in Microsoft Entra ID." -ForegroundColor Green
             Write-Log -Message "The updated password for $RollOverAccountUPN is available in Microsoft Entra ID" -Severity Information -EventID 3003
@@ -825,6 +989,7 @@ Try {
             if ($_.Exception -is [System.Security.Authentication.AuthenticationException]) {
                 throw
             }
+            $lastPasswordSyncFailure = $_.Exception.Message
             Write-Host "The updated password is not available in Microsoft Entra ID yet." -ForegroundColor Yellow
             Write-Log -Message "Password synchronization check failed on attempt $syncAttempt`: $($_.Exception.Message)" -Severity Debug -EventID 0
         }
@@ -837,26 +1002,21 @@ Try {
 
     if (-not $passwordSynchronized) {
         $scriptExitCode = 0x3EB
-        $message = "The updated password for $RollOverAccountUPN was not available in Microsoft Entra ID after five minutes"
+        $message = "Microsoft Entra authentication with the updated password for $RollOverAccountUPN could not be verified after five minutes"
+        if ($lastPasswordSyncFailure) {
+            $message += ". Last authentication error: $lastPasswordSyncFailure"
+        }
         Write-Host $message -ForegroundColor Red
         Write-Log -Message $message -Severity Error -EventID 3114
         throw [System.TimeoutException] $message
     }
 
-    # Retain the temporary-file ACL preparation used by the earlier separate-process
-    # implementation. The current Start-Job path does not store credential material
-    # in this file.
-    $PSShellTempFile = New-TemporaryFile
-    $acl = Get-Acl -Path $PSShellTempFile.FullName
-    $acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($ADUser, "FullControl", "Allow")))
-    Set-Acl -Path $PSShellTempFile.FullName -AclObject $acl
-
-    #region Update seamless SSO as the rollover account
-[pscredential]$AdCredential = New-object System.Management.Automation.PSCredential($ADUser,(ConvertTo-SecureString $secPwd -AsPlainText -Force))
-Write-Log -Message "Impersonating user $ADUser to update the Azure Kerberos object" -Severity Debug -EventID 0
-# A separate process provides the rollover account's Windows logon context. The job
-# creates distinct cloud and on-premises PSCredentials from the same synchronized secret.
-$ADSSResetJob = Start-Job -Credential $AdCredential -ScriptBlock {
+    #region Update seamless SSO with explicit rollover credentials
+Write-Log -Message "Using explicit cloud and on-premises credentials for $ADUser to update the Azure Kerberos object" -Severity Debug -EventID 0
+# The child process remains under SYSTEM because alternate-credential process
+# creation is unsupported for a LocalSystem caller. AzureADSSO receives separate
+# cloud and on-premises PSCredentials created from the synchronized secret.
+$ADSSResetJob = Start-Job -ScriptBlock {
     param ($AzureADSSOModule, $RollOverAccountUPN, $ADUser, $secPwd, $VerboseEnabled)
     $verboseParameters = if ($VerboseEnabled) { @{ Verbose = $true } } else { @{} }
     Import-Module $AzureADSSOModule -ErrorAction Stop @verboseParameters
@@ -893,14 +1053,16 @@ try {
     # even when the child runspace failed.
     $null = Wait-Job -Job $ADSSResetJob -ErrorAction Stop
     if ($ADSSResetJob.State -ne 'Completed') {
-        $jobFailure = $ADSSResetJob.ChildJobs[0].JobStateInfo.Reason
-        if ($jobFailure) {
-            throw $jobFailure
-        }
-        throw [System.InvalidOperationException] "AzureADSSO Forest update job ended in state $($ADSSResetJob.State)"
+        $jobFailureMessage = Get-BackgroundJobErrorMessage -Job $ADSSResetJob
+        throw [System.InvalidOperationException] "AzureADSSO Forest update job ended in state $($ADSSResetJob.State). Details: $jobFailureMessage"
     }
 
-    Receive-Job -Job $ADSSResetJob -ErrorAction Stop | Out-Null
+    $updateJobErrors = @()
+    Receive-Job -Job $ADSSResetJob -ErrorVariable updateJobErrors -ErrorAction SilentlyContinue | Out-Null
+    if ($updateJobErrors.Count -gt 0) {
+        $jobFailureMessage = Get-BackgroundJobErrorMessage -ErrorRecords $updateJobErrors -Job $ADSSResetJob
+        throw [System.InvalidOperationException] "AzureADSSO Forest update job reported an error. Details: $jobFailureMessage"
+    }
     Write-Log -Message "AzureADSSO Forest update completed" -Severity Information -EventID 3002
 }
 finally {
@@ -908,29 +1070,21 @@ finally {
 }
 
     #endregion
-    # Read directly from the PDC emulator to avoid stale AD Web Services cache data.
-    $PDCEmulator = (Get-ADDomain -Identity $DomainName -ErrorAction Stop).PDCEmulator
-    $LDAPPath = "LDAP://$PDCEmulator"
-    $Searcher = New-Object System.DirectoryServices.DirectorySearcher
-    $Searcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry($LDAPPath)
-    # This is an LDAP filter, not a regex: & combines both clauses, objectClass limits
-    # the result to computers, and the escaped PowerShell dollar appends the literal
-    # trailing dollar used by computer sAMAccountName values.
-    $Searcher.Filter = "(&(objectClass=computer)(sAMAccountName=$AzureADSSOAccName`$))"
-    $Searcher.PropertiesToLoad.Add("pwdLastSet") | Out-Null
-    # Verify the computer-account password changed during this execution window.
-    $Result = $Searcher.FindOne()
-    $AzureADSsoAccPwdLastSet = [DateTime]::FromFileTime($Result.Properties.pwdlastset[0])
-    Write-Log -Message "The AzureADSSOAcc computer account was last password reset at $AzureADSsoAccPwdLastSet (read from PDC emulator $PDCEmulator)" -Severity Debug -EventID 0
-    if ($AzureADSsoAccPwdLastSet -gt (Get-Date).AddMinutes(-15)) {
-        Write-Log -Message "The AzureADSSOAcc computer account password was successfully updated at $AzureADSsoAccPwdLastSet" -Severity Debug -EventID 0
+    # A successful rollover must advance pwdLastSet on the same PDC emulator that
+    # supplied the baseline value. A recent but unchanged timestamp is not success.
+    $AzureADSsoAccPwdLastSetAfter = Get-AzureADSSOAccPasswordLastSet -ComputerName $AzureADSSOAccName -Server $PDCEmulator
+    $AzureADSsoAccPwdLastSetAfterText = $AzureADSsoAccPwdLastSetAfter.ToString('o')
+    Write-Log -Message "The AzureADSSOAcc computer account password timestamp after rollover is $AzureADSsoAccPwdLastSetAfterText UTC (read from PDC emulator $PDCEmulator)" -Severity Debug -EventID 0
+    if ($AzureADSsoAccPwdLastSetAfter -gt $AzureADSsoAccPwdLastSetBefore) {
+        Write-Log -Message "The AzureADSSOAcc computer account password timestamp advanced from $AzureADSsoAccPwdLastSetBeforeText UTC to $AzureADSsoAccPwdLastSetAfterText UTC" -Severity Debug -EventID 0
     } else {
-        Write-Log -Message "The AzureADSSOAcc computer account password was not updated. Last password set is $AzureADSsoAccPwdLastSet" -Severity Error -EventID 3108
-        throw [System.InvalidOperationException] "The AzureADSSOAcc computer account password was not updated. Last password set is $AzureADSsoAccPwdLastSet"
+        $message = "The AzureADSSOAcc computer account password timestamp did not advance. Before: $AzureADSsoAccPwdLastSetBeforeText UTC. After: $AzureADSsoAccPwdLastSetAfterText UTC"
+        Write-Log -Message $message -Severity Error -EventID 3108
+        throw [System.InvalidOperationException] $message
     }
     Write-Log -Message "Successfully updated the Azure Kerberos object" -Severity Information -EventID 3004
     $rolloverCompleted = $true
-} 
+}
 catch{
     # Preserve a previously assigned classified exit code; otherwise use the generic
     # failure code and map the exception to an operational event ID below.
@@ -976,7 +1130,7 @@ catch{
         Default {
             Write-Log -Message "An error occurred: $scriptFailureMessage" -Severity Error -EventID 3199
         }
-    }    
+    }
 }
 finally {
     # The completion invariant prevents an early return or unexpected branch from

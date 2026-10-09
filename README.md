@@ -9,7 +9,7 @@
   [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
   [![Microsoft Entra](https://img.shields.io/badge/Microsoft-Entra_ID-5C2D91?logo=microsoft&logoColor=white)](https://www.microsoft.com/security/business/identity-access/microsoft-entra-id)
   [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-  [![Version](https://img.shields.io/badge/version-1.0.20261009.10-2EA44F)](CHANGELOG.md)
+  [![Version](https://img.shields.io/badge/version-1.0.20261009.12-2EA44F)](CHANGELOG.md)
   [![Branch](https://img.shields.io/badge/branch-dev-1F6FEB?logo=git&logoColor=white)](https://github.com/Kili69/AzKerberosRollOver/tree/dev)
   <br>
   [![☕ Buy me a coffee](https://img.shields.io/badge/%E2%98%95-Buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/andreaslmuz)
@@ -27,7 +27,7 @@ AzKerberosRollOver automates the rollover of the Microsoft Entra seamless single
   🛡️ Securely manages the Kerberos decryption key for Microsoft Entra seamless SSO.<br>
   🔎 Automatically discovers <code>AzureADSSOAcc</code> across the forest.<br>
   🔑 Automatically resets the password for the rollover account.<br>
-  👤 Runs the seamless SSO update under the rollover account's identity.<br>
+  👤 Runs the seamless SSO update with explicit credentials for the rollover account.<br>
   ✅ Verifies the update directly against the PDC emulator.<br>
   📝 Writes diagnostics to the Windows Application event log.
 </p>
@@ -70,7 +70,11 @@ The script first loads the required PowerShell modules and checks the configurat
 
 When a rollover is safe, the script generates a new 32-character password and assigns it to the synchronized rollover account. It can then start an Entra Connect delta synchronization and checks every 30 seconds whether the new credential is available in Microsoft Entra ID. If authentication succeeds within five minutes, the synchronized account is used to run `Update-AzureADSSOForest` in a background job.
 
-Finally, the script reads `pwdLastSet` directly from the PDC emulator to verify that the password of `AzureADSSOAcc` was updated successfully. The result is recorded in the local log and the Windows Application event log so that scheduled executions can be monitored.
+Finally, the script reads `pwdLastSet` directly from the same PDC emulator used
+for the initial value. The rollover succeeds only when the final value is newer
+than the saved value from before the update. Both values are recorded in the
+local log. Log-file timestamps use UTC in ISO 8601 format for direct correlation
+with Microsoft Entra sign-in logs.
 
 ## Installation
 
@@ -85,12 +89,21 @@ Create a dedicated Active Directory user account to act as the worker account fo
 - Must be excluded from MFA requirements that apply to the noninteractive
   AzureADSSO authentication flow. The script cannot respond to an MFA prompt and
   terminates when MFA or a blocking Conditional Access requirement is detected.
+- Does not require local interactive or batch sign-in rights. The scheduled task
+  and its background jobs run as `SYSTEM`; the worker account's credentials are
+  passed directly to the AzureADSSO commands.
 
 > [!IMPORTANT]
 > Limit the MFA or Conditional Access exception to this dedicated rollover account
 > and only the conditions required for the rollover. Do not create a broad tenant-wide
 > exclusion. Protect the account with the least-privilege permissions documented
 > below and monitor its sign-in activity.
+
+The script deliberately does not start jobs under alternate credentials. Windows
+does not support that process-creation mechanism when the caller is LocalSystem.
+Instead, each background job remains in the scheduled task's `SYSTEM` context and
+passes explicit cloud and on-premises `PSCredential` objects to the AzureADSSO
+commands.
 
 #### 🖥️ Entra Connect server
 
@@ -439,7 +452,7 @@ The scheduled PowerShell process returns the following exit codes to Task Schedu
 | --- | ---: | --- | --- |
 | `0x0` | `0` | The script completed successfully, or `-WhatIf` completed without making changes. | No action is required. |
 | `0x3EA` | `1002` | The `AzureKrbRollOver` Windows event source could not be created. | Run the task with administrative rights or create the event source before the next run. |
-| `0x3EB` | `1003` | The updated worker account password was not available in Microsoft Entra ID after five minutes. | Check Entra Connect synchronization health and password hash synchronization before retrying. |
+| `0x3EB` | `1003` | Microsoft Entra authentication with the updated worker account password could not be verified after five minutes. | Review the final authentication error in the local log, then check Entra Connect synchronization health, password hash synchronization, and authentication policy before retrying. |
 | `0x3EC` | `1004` | Microsoft Entra authentication was blocked by an MFA or Conditional Access requirement. | Review the failed sign-in, per-user MFA, and the applied Conditional Access policies. Exclude the noninteractive rollover account only after an appropriate security review, or use a supported authentication design that satisfies the requirement. |
 | `0x1` | `1` | The rollover workflow terminated with another error or ended before completion. | Review the local log and Windows Application events to identify the failed operation. |
 
@@ -459,7 +472,7 @@ The following errors can be written to the Windows Application event log. See th
 | `3109` | The configured worker account could not be found in Active Directory. | Verify `-RollOverADAccountName` and confirm that the account exists in the current domain. |
 | `3110` | An invalid argument was supplied or a required PowerShell command is unavailable. | Review the supplied parameters and confirm that all required modules and commands are installed. |
 | `3111` | A required PowerShell module could not be loaded. | Confirm that `AzureADSSO`, `ActiveDirectory`, and `ADSync` are installed and verify `-AzureADSSOModule`. |
-| `3114` | The worker account password was not synchronized to Microsoft Entra ID within five minutes. | Check Entra Connect synchronization health, password hash synchronization, and the worker account's synchronization scope. |
+| `3114` | Microsoft Entra authentication with the updated worker account password could not be verified within five minutes. | Review the final authentication error in the local log, then check synchronization health, the worker account's synchronization scope, and Microsoft Entra sign-in logs. |
 | `3197` | The script could not write to its log file. | Verify that the log directory exists, has free space, and grants write access to the task identity. |
 | `3198` | An invalid operation or authentication operation failed. | Review the detailed local log and Microsoft Entra sign-in logs for the underlying exception. |
 | `3199` | An unexpected error occurred. | Review the detailed local log and Windows event message for the exception and failed operation. |
