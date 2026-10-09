@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 0.1.20261009.8
+.VERSION 1.0.20261009.9
 .GUID 2efdf5d8-370e-425c-afad-e5951a84f893
 
 .AUTHOR Andreas Lucas [MSFT]
@@ -366,7 +366,7 @@ function Write-Log {
 #region Script Variables
 
 # Runtime identity and security settings used throughout the workflow.
-$ScriptVersion = "0.1.20261009.8"
+$ScriptVersion = "1.0.20261009.9"
 $passwordSize = 32
 $eventLog = "Application"
 $source = "AzureKrbRollOver"

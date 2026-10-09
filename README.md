@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/assets/azkerberosrollover-logo.png" alt="AzKerberosRollOver logo" width="280">
 
-  # AzKerberosRollOver
+  # Entra-SSO Kerberos object password rollover automation
 
   **Automated Kerberos key rollover for Microsoft Entra seamless single sign-on**
 
@@ -9,6 +9,9 @@
   [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
   [![Microsoft Entra](https://img.shields.io/badge/Microsoft-Entra_ID-5C2D91?logo=microsoft&logoColor=white)](https://www.microsoft.com/security/business/identity-access/microsoft-entra-id)
   [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+  [![Version](https://img.shields.io/badge/version-1.0.20261009.9-2EA44F)](CHANGELOG.md)
+  [![Branch](https://img.shields.io/badge/branch-dev-1F6FEB?logo=git&logoColor=white)](https://github.com/Kili69/AzKerberosRollOver/tree/dev)
+  <br>
   [![☕ Buy me a coffee](https://img.shields.io/badge/%E2%98%95-Buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/andreaslmuz)
 
   [Overview](#overview) · [The problem](#the-problem) · [The solution](#the-solution) · [Installation](#installation) · [Script parameters](#script-parameters) · [Monitoring](#monitoring) · [Troubleshooting](#troubleshooting) · [Contributors](#contributors) · [Developer information](#developer-information) · [License](#license)
@@ -311,7 +314,7 @@ Get-WinEvent -FilterHashtable @{
 } -MaxEvents 20
 ```
 
-See the [event ID reference](EventID.md) for the events, severities, and messages written by the script.
+See the [event ID reference](EVENTID.md) for the events, severities, and messages written by the script.
 
 > [!NOTE]
 > `-WhatIf` does not create or modify log files, event sources, or Windows events.
@@ -426,7 +429,7 @@ Get-Help $scriptPath -Full
 
 ## Troubleshooting
 
-Start troubleshooting by reviewing the local log file and the Windows Application events. Use the [event ID reference](EventID.md) to identify the failed stage and its meaning.
+Start troubleshooting by reviewing the local log file and the Windows Application events. Use the [event ID reference](EVENTID.md) to identify the failed stage and its meaning.
 
 ### Exit codes
 
@@ -444,7 +447,7 @@ The most recent result is displayed in the **Last Run Result** column in Task Sc
 
 ### Windows Event Log
 
-The following errors can be written to the Windows Application event log. See the [event ID reference](EventID.md) for the complete event catalog.
+The following errors can be written to the Windows Application event log. See the [event ID reference](EVENTID.md) for the complete event catalog.
 
 | Event ID | Error | Recommended action |
 | --- | --- | --- |
@@ -489,7 +492,7 @@ Contributions, bug reports, and improvement suggestions are welcome through the 
 
 ## Developer information
 
-Repository setup, implementation details, versioning, Git hooks, contribution guidance, and validation procedures are documented in the [developer guide](developer.md).
+Repository setup, implementation details, versioning, Git hooks, contribution guidance, and validation procedures are documented in the [developer guide](DEVELOPER.md).
 
 ## License
 

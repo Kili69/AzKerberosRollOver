@@ -1,16 +1,20 @@
 name: Release package
 
 on:
-  release:
-    types:
-      - published
+  push:
+    branches:
+      - main
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
-  package:
-    name: Create installation package
+  release:
+    name: Create release
     runs-on: ubuntu-latest
 
     steps:
@@ -20,11 +24,18 @@ jobs:
       - name: Build installation package
         id: package
         shell: pwsh
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          $safeTag = $env:RELEASE_TAG -replace '[^A-Za-z0-9._-]', '-'
-          $packageName = "AzKerberosRollOver-$safeTag"
+          $scriptContent = Get-Content -LiteralPath './azKerberosRollover.ps1' -Raw
+          $versionMatch = [regex]::Match(
+            $scriptContent,
+            '(?m)^\.VERSION\s+(?<version>\d+\.\d+\.\d{8}\.\d+)\s*$'
+          )
+          if (-not $versionMatch.Success) {
+            throw 'No release version was found in azKerberosRollover.ps1.'
+          }
+
+          $version = $versionMatch.Groups['version'].Value
+          $packageName = "AzKerberosRollOver-$version"
           $stagingPath = Join-Path $env:RUNNER_TEMP $packageName
           $archivePath = Join-Path $env:GITHUB_WORKSPACE "$packageName.zip"
 
@@ -35,12 +46,17 @@ jobs:
 
           Compress-Archive -Path (Join-Path $stagingPath '*') -DestinationPath $archivePath
           "archive_path=$archivePath" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Attach installation package to release
+      - name: Create GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
           ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+          VERSION: ${{ steps.package.outputs.version }}
         run: |
-          gh release upload $env:RELEASE_TAG $env:ARCHIVE_PATH --clobber
+          $tag = "v$env:VERSION"
+          gh release create $tag $env:ARCHIVE_PATH `
+            --target $env:GITHUB_SHA `
+            --title "AzKerberosRollOver $env:VERSION" `
+            --generate-notes

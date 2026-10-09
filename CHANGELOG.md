@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.20261009.9] - 2026-10-09
+
+### Changed
+
+- Modified: `.github/workflows/release.yml`
+- Renamed: `developer.md` to `DEVELOPER.md`
+- Renamed: `EventID.md` to `EVENTID.md`
+- Modified: `README.md`
+- Modified: `azKerberosRollover.ps1`
+- Modified: `development/Test-Changelog.ps1`
+- Modified: `development/Update-Version.ps1`
+
 ## [Unreleased]
 
 ### Added
