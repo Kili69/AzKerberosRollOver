@@ -1,6 +1,53 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Added
+
+- Added standard PowerShell verbose output, including the log file path and verbose
+  output from the AzureADSSO background job.
+- Added support for resolving the rollover account as a `sAMAccountName`, UPN, or
+  `DOMAIN\sAMAccountName`.
+- Added an unconditional startup version display.
+- Added preflight checks for the executing principal's Reset Password permission on
+  the rollover account and the rollover account's Change/Reset Password permissions
+  on `AzureADSSOAcc`.
+- Added `Set-AzKerberosRolloverPermissions.ps1` to protect the rollover user with the
+  domain's `AdminSDHolder` DACL, grant Reset Password to the Entra Connect computer,
+  and delegate the rollover account on `AzureADSSOAcc`.
+- Added `-Force` to the permission setup script to suppress ACL confirmation prompts
+  without bypassing `-WhatIf`.
+- Added an unconditional version display to the permission setup script and replaced
+  ActiveDirectory cmdlet-import noise with one concise module status message.
+
+### Changed
+
+- Replaced the inverse `DoNotStartSync` switch with `StartEntraConnectSync`.
+- Disabled Entra Connect delta synchronization by default; it now runs only when
+  `StartEntraConnectSync` is specified.
+- Limited ADSync module loading to executions that request an Entra Connect sync.
+- Corrected the script copyright metadata and consolidated runtime prerequisites in
+  the comment-based help description.
+- Evaluated the local computer account and its AD groups during permission preflight
+  when the rollover task runs as local SYSTEM.
+
+### Fixed
+
+- Displayed startup and invalid-operation failures in the console.
+- Logged event-source creation failures directly to the log file instead of writing
+  them through the unsuitable `Application` event source.
+- Resolved UPN and `DOMAIN\sAMAccountName` inputs to the correct AD user, domain, and
+  credentials before resetting the password.
+- Propagated AzureADSSO background-job failures to the main workflow instead of
+  reporting success and continuing with password verification.
+- Removed the `Wait-Job` status table from normal console output and preserved the
+  original exception message in final error reporting.
+- Supported Active Directory module versions that return `tokenGroups` entries as
+  `SecurityIdentifier` objects instead of raw SID byte arrays.
 
 ## [0.1.20261009.1] - 2026-10-09
 
@@ -17,92 +64,172 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- Modified: `EventID.md`
-- Modified: `LICENSE`
-- Modified: `README.md`
-- Modified: `azKerberosRollover.ps1`
-- Modified: `developer.md`
+- Adopted the MIT license.
+- Expanded operational, monitoring, and event ID documentation.
+
+### Fixed
+
+- Returned a nonzero process exit code when the rollover workflow fails.
+- Corrected event ID descriptions to match the script behavior.
 
 ## [0.1.20261008.1] - 2026-10-08
 
 ### Changed
 
-- Modified: `README.md`
-- Modified: `developer.md`
+- Restructured the project documentation around installation, operation, monitoring,
+  troubleshooting, and development.
 
 ## [0.1.20261007.1] - 2026-10-07
 
+### Added
+
+- Added project branding and the AzKerberosRollOver logo.
+- Added developer guidance.
+
 ### Changed
 
-- Modified: `README.md`
-- Modified: `developer.md`
-- Added: `docs/assets/azkerberosrollover-logo.png`
+- Modernized and expanded the README.
 
 ## [0.1.20260929.4] - 2026-09-29
 
+### Added
+
+- Added `WhatIf` support for validating prerequisites without changing passwords,
+  starting synchronization, updating seamless SSO, or writing logs.
+- Added comment-based help and developer documentation.
+
 ### Changed
 
-- Modified: `README.md`
-- Modified: `azKerberosRollover.ps1`
-- Added: `developer.md`
+- Improved parameter validation, error handling, logging, and rollover verification.
 
 ## [0.1.20260929.3] - 2026-09-29
 
-### Changed
+### Added
 
-- Added: `.githooks/pre-commit`
-- Added: `.githooks/pre-merge-commit`
-- Added: `CHANGELOG.md`
-- Modified: `README.md`
-- Modified: `azKerberosRollover.ps1`
-- Added: `tools/Update-Version.ps1`
+- Added repository Git hooks, changelog maintenance, and automatic version tooling.
 
 ## [0.1.20260929.2] - 2026-09-29
 
-### Changed
+### Added
 
-- Added: `.githooks/pre-merge-commit`
-- Modified: `README.md`
+- Added merge-commit version automation.
 
 ## [0.1.20260929.1] - 2026-09-29
 
+### Added
+
+- Added initial commit-version automation and pre-commit integration.
+
+## [0.1.20251110] - 2025-11-10
+
+### Added
+
+- Added `IgnoreTGTLifetimeCheck` to allow an explicitly forced rollover within the
+  configured TGT lifetime.
+
+## [0.1.20251107] - 2025-11-07
+
 ### Changed
 
-- Added: `.githooks/pre-commit`
-- Added: `CHANGELOG.md`
-- Modified: `README.md`
-- Added: `tools/Update-Version.ps1`
+- Ran the AzureADSSO update in a separate PowerShell process under the rollover
+  account, enabling device-aware Conditional Access scenarios.
+
+## [0.1.20251014] - 2025-10-14
+
+### Added
+
+- Added forest-wide discovery of `AzureADSSOAcc` through a Global Catalog.
+
+### Fixed
+
+- Corrected error handling for cross-domain `AzureADSSOAcc` deployments.
+
+## [0.1.20251007] - 2025-10-07
+
+### Changed
+
+- Expanded error handling and diagnostic logging.
+
+## [0.1.20251006] - 2025-10-06
+
+### Added
+
+- Added event IDs for more precise operational monitoring.
+
+### Changed
+
+- Moved timing validation into the runtime workflow and used safe bounded values for
+  unsupported input.
+- Allowed a TGT lifetime of zero to bypass the age check.
+
+### Fixed
+
+- Corrected log file naming when running in PowerShell ISE.
+
+## [0.1.20250818] - 2025-08-18
+
+### Added
+
+- Added `TGTLifetimeHours` to prevent rollover while tickets encrypted with the
+  current key may still be valid.
+
+### Fixed
+
+- Corrected minor rollover and validation issues.
 
 ## [0.1.20250509] - 2025-05-09
 
-### Changed
+### Added
 
-- Added validation for the rollover account UPN, AzureADSSO module path, log path, and SAM account name.
+- Added validation for the rollover account UPN, AzureADSSO module path, log path,
+  and rollover account name.
 - Added `DoNotStartSync` to optionally skip the Azure AD synchronization.
-- Added retries for debug log sharing violations.
+- Added retry handling for debug log sharing violations.
 
 ## [0.1.20250508] - 2025-05-08
 
-### Changed
+### Added
 
 - Added PowerShell ISE log file name detection.
-- Restricted `AzureSyncWaitTime` to 15 through 120 seconds.
+- Added bounds for `AzureSyncWaitTime`.
 
 ## [0.1.20250504] - 2025-05-04
 
 ### Changed
 
-- Added additional error logging.
+- Expanded error logging.
 
 ## [0.1.20250501] - 2025-05-01
+
+### Added
+
+- Added a configurable log file location.
 
 ### Changed
 
 - Improved code comments and formatting.
-- Added a parameter for the log file location.
 
 ## [0.1] - 2021
 
 ### Added
 
-- Initial version of the script.
+- Added the initial script.
+
+[Unreleased]: https://github.com/Kili69/AzKerberosRollOver/compare/55cca79077179e307f13cc95efac04f50a8a76c4...HEAD
+[0.1.20261008.2]: https://github.com/Kili69/AzKerberosRollOver/commit/55cca79077179e307f13cc95efac04f50a8a76c4
+[0.1.20261008.1]: https://github.com/Kili69/AzKerberosRollOver/commit/fd1e89758b08519714fbf22b27709be380e713cf
+[0.1.20261007.1]: https://github.com/Kili69/AzKerberosRollOver/commit/f7461b10e7050d0a1bae7721b82e21115d6bf347
+[0.1.20260929.4]: https://github.com/Kili69/AzKerberosRollOver/commit/76ce567c7731997afb00c0968eac14233c73cc7a
+[0.1.20260929.3]: https://github.com/Kili69/AzKerberosRollOver/commit/610fe61
+[0.1.20260929.2]: https://github.com/Kili69/AzKerberosRollOver/commit/b6ba44b
+[0.1.20260929.1]: https://github.com/Kili69/AzKerberosRollOver/commit/2e8f44b
+[0.1.20251110]: https://github.com/Kili69/AzKerberosRollOver/commit/f5f43f8
+[0.1.20251107]: https://github.com/Kili69/AzKerberosRollOver/commit/a5231e6
+[0.1.20251014]: https://github.com/Kili69/AzKerberosRollOver/commit/ad7ac56
+[0.1.20251007]: https://github.com/Kili69/AzKerberosRollOver/commit/cef14c0
+[0.1.20251006]: https://github.com/Kili69/AzKerberosRollOver/commit/4a86a64
+[0.1.20250818]: https://github.com/Kili69/AzKerberosRollOver/commit/059c291
+[0.1.20250509]: https://github.com/Kili69/AzKerberosRollOver/commit/72e9dea
+[0.1.20250508]: https://github.com/Kili69/AzKerberosRollOver/commit/61c0186
+[0.1.20250504]: https://github.com/Kili69/AzKerberosRollOver/commit/5faa485
+[0.1.20250501]: https://github.com/Kili69/AzKerberosRollOver/commit/4d12688

@@ -97,138 +97,41 @@ The following PowerShell modules must be available on the Microsoft Entra Connec
 
 The worker account must be able to change and reset the password of the `AzureADSSOAcc` computer object. Delegate only the required **Change Password** and **Reset Password** extended rights instead of granting broad administrative permissions.
 
-Run the following commands once with an account that is allowed to modify permissions on the `AzureADSSOAcc` object:
+Run the permission setup script from the Entra Connect server with an account that
+can modify both target ACLs:
 
 ```powershell
-Import-Module ActiveDirectory
-
-$workerAccount = Get-ADUser -Identity 'AzKrbRollOver'
-$azureAdSsoAccount = Get-ADComputer -Identity 'AzureADSSOAcc'
-$aclPath = "AD:\$($azureAdSsoAccount.DistinguishedName)"
-$acl = Get-Acl -Path $aclPath
-
-$extendedRightGuids = @(
-    [Guid]'ab721a53-1e2f-11d0-9819-00aa0040529b' # Change Password
-    [Guid]'00299570-246d-11d0-a768-00aa006e0529' # Reset Password
-)
-
-foreach ($extendedRightGuid in $extendedRightGuids) {
-    $accessRule = [System.DirectoryServices.ActiveDirectoryAccessRule]::new(
-        $workerAccount.SID,
-        [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
-        [System.Security.AccessControl.AccessControlType]::Allow,
-        $extendedRightGuid
-    )
-    $acl.AddAccessRule($accessRule)
-}
-
-Set-Acl -Path $aclPath -AclObject $acl
+.\tools\Set-AzKerberosRolloverPermissions.ps1 `
+    -RollOverADAccountName 'AzKrbRollOver' `
+    -Verbose
 ```
 
-Replace `AzKrbRollOver` if a different worker account name is used. The two GUIDs identify the built-in Active Directory extended rights for changing and resetting a password.
+Use `-WhatIf` first to resolve the accounts and preview all ACL changes. The script
+performs these operations:
 
-Verify the delegated permissions:
+- Replaces the rollover user's DACL with the current DACL of `AdminSDHolder` from
+  the rollover user's domain.
+- Disables permission inheritance on the rollover user without preserving its old
+  inherited or explicit access rules.
+- Grants only **Reset Password** on the rollover user to the Entra Connect computer
+  account.
+- Grants **Change Password** and **Reset Password** on `AzureADSSOAcc` to the
+  rollover user.
 
-```powershell
-$domainNetBiosName = (Get-ADDomain).NetBIOSName
-$workerPrincipal = "$domainNetBiosName\$($workerAccount.SamAccountName)"
-
-(Get-Acl -Path $aclPath).Access |
-    Where-Object {
-        $_.IdentityReference -eq $workerPrincipal -and
-        $_.ObjectType -in $extendedRightGuids
-    } |
-    Select-Object IdentityReference, ActiveDirectoryRights, AccessControlType, ObjectType
-```
+Use `-EntraConnectComputerName` when preparing a different Entra Connect server.
+Use `-Force` to suppress both ACL confirmation prompts. `-Force` does not override
+`-WhatIf`.
 
 ### Prepare the Entra Connect server
 
-When the scheduled task runs as `SYSTEM`, it uses the computer account of the Entra Connect server to reset the worker account password. This computer account therefore requires the **Change Password** and **Reset Password** extended rights on the worker account object.
-
-Password-management permissions on the worker account should not be inherited. Disable inheritance on the worker account and restrict password changes and resets to:
-
-- The computer account of the Entra Connect server.
-- The built-in **Domain Admins** group.
-
 > [!CAUTION]
-> Changing an Active Directory ACL can affect account administration. Test the commands in a non-production environment first and review the resulting ACL before using the worker account. The example preserves other inherited permissions as explicit entries, but removes password-management and generic extended-right entries from all principals except the Entra Connect server and Domain Admins.
+> Applying the `AdminSDHolder` DACL replaces the existing permissions on the rollover
+> user. Always run the setup script with `-WhatIf` first and review the target objects.
 
-Run the following commands once with an account that is allowed to modify permissions on the worker account:
-
-```powershell
-Import-Module ActiveDirectory
-
-$domain = Get-ADDomain
-$workerAccount = Get-ADUser -Identity 'AzKrbRollOver'
-$entraConnectServer = Get-ADComputer -Identity $env:COMPUTERNAME
-$domainAdmins = Get-ADGroup -Identity "$($domain.DomainSID)-512"
-$aclPath = "AD:\$($workerAccount.DistinguishedName)"
-$acl = Get-Acl -Path $aclPath
-
-$extendedRightGuids = @(
-    [Guid]'ab721a53-1e2f-11d0-9819-00aa0040529b' # Change Password
-    [Guid]'00299570-246d-11d0-a768-00aa006e0529' # Reset Password
-)
-
-$allowedSids = @(
-    $entraConnectServer.SID.Value
-    $domainAdmins.SID.Value
-)
-
-# Disable inheritance while preserving existing inherited entries as explicit entries.
-$acl.SetAccessRuleProtection($true, $true)
-
-$rulesToRemove = @(
-    $acl.Access | Where-Object {
-        $identitySid = $_.IdentityReference.Translate(
-            [System.Security.Principal.SecurityIdentifier]
-        ).Value
-
-        $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
-        ($_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight) -and
-        ($_.ObjectType -eq [Guid]::Empty -or $_.ObjectType -in $extendedRightGuids) -and
-        $identitySid -notin $allowedSids
-    }
-)
-
-foreach ($rule in $rulesToRemove) {
-    [void]$acl.RemoveAccessRuleSpecific($rule)
-}
-
-foreach ($principal in @($entraConnectServer, $domainAdmins)) {
-    foreach ($extendedRightGuid in $extendedRightGuids) {
-        $accessRule = [System.DirectoryServices.ActiveDirectoryAccessRule]::new(
-            $principal.SID,
-            [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
-            [System.Security.AccessControl.AccessControlType]::Allow,
-            $extendedRightGuid
-        )
-        [void]$acl.AddAccessRule($accessRule)
-    }
-}
-
-Set-Acl -Path $aclPath -AclObject $acl
-```
-
-Run the commands on the Entra Connect server or replace `$env:COMPUTERNAME` with the name of that server. Replace `AzKrbRollOver` if a different worker account name is used.
-
-Verify the delegated permissions:
-
-```powershell
-$domainNetBiosName = $domain.NetBIOSName
-$serverPrincipal = "$domainNetBiosName\$($entraConnectServer.SamAccountName)"
-$domainAdminsPrincipal = "$domainNetBiosName\$($domainAdmins.SamAccountName)"
-
-(Get-Acl -Path $aclPath).Access |
-    Where-Object {
-        $_.IdentityReference -in @($serverPrincipal, $domainAdminsPrincipal) -and
-        $_.ObjectType -in $extendedRightGuids
-    } |
-    Select-Object IdentityReference, ActiveDirectoryRights, AccessControlType, ObjectType
-```
-
-> [!NOTE]
-> If the scheduled task runs under a dedicated service account instead of `SYSTEM`, delegate these rights to that service account rather than to the Entra Connect server computer account.
+When the scheduled task runs as local `SYSTEM`, outbound Active Directory access uses
+the Entra Connect server's computer account. The explicit Reset Password ACE granted
+to that computer account therefore authorizes the scheduled rollover without granting
+password-reset permission directly to `NT AUTHORITY\SYSTEM`.
 
 ### Copy the script
 
@@ -464,7 +367,7 @@ The following errors can be written to the Windows Application event log. See th
 
 | Event ID | Error | Recommended action |
 | --- | --- | --- |
-| `3102` | The worker account password could not be reset because access was denied. | Verify that the task runs as `SYSTEM` and that the Entra Connect server computer account has **Change Password** and **Reset Password** rights on the worker account. |
+| `3102` | The worker account password could not be reset because access was denied. | Verify that the task runs as `SYSTEM` and that the Entra Connect server computer account has **Reset Password** on the protected worker account. |
 | `3103` | Multifactor authentication is enforced for the worker account. | Review the authentication requirements and Conditional Access policies applied to the worker account. |
 | `3104` | Authentication of the worker account was blocked by multifactor requirements. | Confirm that the account and device context satisfy the applicable Conditional Access policies. |
 | `3105` | The new worker account password is not available in Microsoft Entra ID. | Check Entra Connect synchronization health, password hash synchronization, and the worker account's synchronization scope. |
