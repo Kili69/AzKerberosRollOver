@@ -25,7 +25,7 @@ jobs:
           HEAD_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          ./tools/Test-Changelog.ps1 `
+          ./development/Test-Changelog.ps1 `
             -BaseRevision $env:BASE_REVISION `
             -HeadRevision $env:HEAD_REVISION `
             -DefaultBranch $env:DEFAULT_BRANCH

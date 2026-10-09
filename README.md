@@ -9,6 +9,7 @@
   [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
   [![Microsoft Entra](https://img.shields.io/badge/Microsoft-Entra_ID-5C2D91?logo=microsoft&logoColor=white)](https://www.microsoft.com/security/business/identity-access/microsoft-entra-id)
   [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+  [![☕ Buy me a coffee](https://img.shields.io/badge/%E2%98%95-Buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/andreaslmuz)
 
   [Overview](#overview) · [The problem](#the-problem) · [The solution](#the-solution) · [Installation](#installation) · [Script parameters](#script-parameters) · [Monitoring](#monitoring) · [Troubleshooting](#troubleshooting) · [Contributors](#contributors) · [Developer information](#developer-information) · [License](#license)
 </div>
@@ -78,24 +79,87 @@ Create a dedicated Active Directory user account to act as the worker account fo
 
 - Must be synchronized to Microsoft Entra ID.
 - Must have a permanent assignment of the Microsoft Entra **Hybrid Identity Administrator** role.
+- Must be excluded from MFA requirements that apply to the noninteractive
+  AzureADSSO authentication flow. The script cannot respond to an MFA prompt and
+  terminates when MFA or a blocking Conditional Access requirement is detected.
+
+> [!IMPORTANT]
+> Limit the MFA or Conditional Access exception to this dedicated rollover account
+> and only the conditions required for the rollover. Do not create a broad tenant-wide
+> exclusion. Protect the account with the least-privilege permissions documented
+> below and monitor its sign-in activity.
 
 #### 🖥️ Entra Connect server
 
+Run the rollover workflow directly on the Microsoft Entra Connect server. This is the
+recommended and expected deployment because the required `AzureADSSO` module and its
+binary dependencies are installed there.
+
+Running the workflow on another server is possible only when all required PowerShell
+modules and their dependencies are installed and the server can reach the required
+Active Directory domain controllers and Microsoft Entra endpoints.
+
 #### 🧩 PowerShell modules
 
-The following PowerShell modules must be available on the Microsoft Entra Connect server:
+Install and import the Active Directory PowerShell module from an elevated Windows
+PowerShell session on Windows Server:
 
-- `AzureADSSO`
-- `ActiveDirectory`
-- `ADSync`
+```powershell
+Install-WindowsFeature -Name RSAT-AD-PowerShell
+Import-Module ActiveDirectory
+```
+
+Verify that the module is available:
+
+```powershell
+Get-Module -ListAvailable -Name ActiveDirectory
+```
+
+Microsoft Entra Connect automatically installs the `AzureADSSO` and `ADSync`
+PowerShell modules on the Entra Connect server:
+
+- `AzureADSSO` — required for Microsoft Entra authentication and the seamless SSO
+  Kerberos key update.
+- `ADSync` — required only when `-StartEntraConnectSync` is used.
 
 > [!NOTE]
 > The default path of the `AzureADSSO` module is:
 > `C:\Program Files\Microsoft Azure Active Directory Connect\AzureADSSO.psd1`
 
+### Copy the script
+
+Download or clone the repository on the Entra Connect server. Open an elevated
+Windows PowerShell session in the repository directory and copy the main script and
+the `tools` directory to a permanent location. A directory under `Program Files` is
+recommended:
+
+```powershell
+$installPath = Join-Path $env:ProgramFiles 'AzKerberosRollOver'
+$installToolsPath = Join-Path $installPath 'tools'
+
+New-Item -Path $installPath -ItemType Directory -Force | Out-Null
+New-Item -Path $installToolsPath -ItemType Directory -Force | Out-Null
+Copy-Item -LiteralPath '.\azKerberosRollover.ps1' -Destination $installPath -Force
+Copy-Item -Path '.\tools\*' -Destination $installToolsPath -Recurse -Force
+```
+
+The resulting paths are:
+
+```text
+C:\Program Files\AzKerberosRollOver\azKerberosRollover.ps1
+C:\Program Files\AzKerberosRollOver\tools
+```
+
+> [!NOTE]
+> Keep the script and tools in a protected directory that cannot be modified by
+> standard users. Update all installed copies when deploying a newer version.
+
 ### Prepare the worker account
 
-The worker account must be able to change and reset the password of the `AzureADSSOAcc` computer object. Delegate only the required **Change Password** and **Reset Password** extended rights instead of granting broad administrative permissions.
+The worker account requires **Write** and **Reset Password** on the
+`AzureADSSOAcc` computer object. These delegated rights allow
+`Update-AzureADSSOForest` to update the object without granting Domain Admin or
+Full Control.
 
 Run the permission setup script from the Entra Connect server with an account that
 can modify both target ACLs:
@@ -115,77 +179,19 @@ performs these operations:
   inherited or explicit access rules.
 - Grants only **Reset Password** on the rollover user to the Entra Connect computer
   account.
-- Grants **Change Password** and **Reset Password** on `AzureADSSOAcc` to the
+- Grants **Write** and **Reset Password** on `AzureADSSOAcc` to the
   rollover user.
 
 Use `-EntraConnectComputerName` when preparing a different Entra Connect server.
 Use `-Force` to suppress both ACL confirmation prompts. `-Force` does not override
 `-WhatIf`.
 
-### Prepare the Entra Connect server
-
 > [!CAUTION]
-> Applying the `AdminSDHolder` DACL replaces the existing permissions on the rollover
-> user. Always run the setup script with `-WhatIf` first and review the target objects.
-
-When the scheduled task runs as local `SYSTEM`, outbound Active Directory access uses
-the Entra Connect server's computer account. The explicit Reset Password ACE granted
-to that computer account therefore authorizes the scheduled rollover without granting
-password-reset permission directly to `NT AUTHORITY\SYSTEM`.
-
-### Copy the script
-
-Download or clone the repository on the Entra Connect server. Open an elevated Windows PowerShell session in the repository directory and copy the script to a permanent location. A directory under `Program Files` is recommended:
-
-```powershell
-$installPath = Join-Path $env:ProgramFiles 'AzKerberosRollOver'
-
-New-Item -Path $installPath -ItemType Directory -Force | Out-Null
-Copy-Item -LiteralPath '.\azKerberosRollover.ps1' -Destination $installPath -Force
-```
-
-The resulting script path is:
-
-```text
-C:\Program Files\AzKerberosRollOver\azKerberosRollover.ps1
-```
-
-> [!NOTE]
-> Keep the script in a protected directory that cannot be modified by standard users. Update the installed copy when deploying a newer version.
-
-### Create the scheduled task
-
-Create a daily scheduled task that runs the script as `SYSTEM`. The task passes only the required `RollOverAccountUPN` script parameter.
-
-Run the following commands from an elevated Windows PowerShell session and replace the example UPN with the UPN of the synchronized worker account:
-
-```powershell
-$scriptPath = Join-Path $env:ProgramFiles 'AzKerberosRollOver\azKerberosRollover.ps1'
-$rollOverAccountUpn = 'AzKrbRollOver@contoso.com'
-
-$action = New-ScheduledTaskAction `
-    -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RollOverAccountUPN `"$rollOverAccountUpn`""
-
-$trigger = New-ScheduledTaskTrigger -Daily -At '02:00'
-$principal = New-ScheduledTaskPrincipal `
-    -UserId 'SYSTEM' `
-    -LogonType ServiceAccount `
-    -RunLevel Highest
-
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
-
-Register-ScheduledTask `
-    -TaskName 'AzKerberosRollOver' `
-    -Description 'Daily rollover check for the Microsoft Entra seamless SSO Kerberos key.' `
-    -Action $action `
-    -Trigger $trigger `
-    -Principal $principal `
-    -Settings $settings `
-    -Force
-```
-
-The task runs every day at 02:00. Change the value passed to `-At` if a different execution time is required.
+> The setup script replaces the rollover user's existing permissions with a one-time
+> copy of the current `AdminSDHolder` DACL. This does not make the rollover account a
+> protected account, and the `AdminSDHolder`/SDProp process does not subsequently
+> maintain or reapply these permissions. Always run the setup script with `-WhatIf`
+> first and review the target objects.
 
 ### Validate the installation
 
@@ -206,6 +212,109 @@ Open an elevated Windows PowerShell session and preview the rollover without mak
 & "$env:ProgramFiles\AzKerberosRollOver\azKerberosRollover.ps1" `
     -RollOverAccountUPN 'AzKrbRollOver@contoso.com'
 ```
+
+### Create the scheduled task
+
+Use the task setup script from an elevated Windows PowerShell session. It registers
+`AzKerberosRollOver` with highest privileges under local `SYSTEM`:
+
+```powershell
+New-Item `
+    -Path "$env:ProgramData\AzKerberosRollOver\Logs" `
+    -ItemType Directory `
+    -Force | Out-Null
+
+.\tools\New-AzKerberosRolloverScheduleTask.ps1 `
+    -KerberosRollOverAccount 'AzKrbRollOver@contoso.com' `
+    -TimeToRun '01:00' `
+    -Repeat Daily `
+    -Path "$env:ProgramFiles\AzKerberosRollOver" `
+    -LogPath "$env:ProgramData\AzKerberosRollOver\Logs" `
+    -Force
+```
+
+When a value is omitted, the setup script requests it interactively. Press Enter to
+accept these defaults:
+
+- `KerberosRollOverAccount`: `svc-KerberosRollOver`
+- `TimeToRun`: `01:00`
+- `Repeat`: `Daily`
+- `Path`: current directory, or its parent when the current directory is named `tools`
+- `LogPath`: the default selected by `azKerberosRollover.ps1`
+
+`LogPath`, when supplied, must identify an existing directory. Invalid interactive
+input displays a warning and is requested again; leaving it blank uses the rollover
+script's default log directory. An invalid value supplied through `-LogPath`
+terminates the setup.
+
+`TimeToRun` must be a valid 24-hour time from `00:00` through `23:59`. Invalid
+interactive input displays a warning and is requested again. An invalid value supplied
+through `-TimeToRun` terminates the setup.
+
+`Repeat` accepts only `Daily`, `Weekly`, or `Hourly`. Invalid interactive input
+displays a warning and is requested again. An invalid value supplied through
+`-Repeat` terminates the setup.
+
+The rollover account is validated against Active Directory and can be entered as a
+`sAMAccountName`, UPN, or `DOMAIN\sAMAccountName`. If an interactively entered
+account is not found, the setup script displays a warning and asks again. An invalid
+account supplied through `-KerberosRollOverAccount` terminates the setup.
+
+The interactive path prompt expects either the directory that contains
+`azKerberosRollover.ps1` or the full path to that file. If the script is not found,
+the setup script explains which directory was checked and requests the path again.
+An invalid path supplied through `-Path` terminates the setup with an error.
+For example, when it is started from
+`C:\Program Files\AzKerberosRollOver\tools`, the displayed default is
+`C:\Program Files\AzKerberosRollOver`.
+
+`Repeat` accepts `Daily`, `Weekly`, and `Hourly`. A weekly task runs on the weekday
+on which it is created. An hourly task starts at the next occurrence of `TimeToRun`.
+Use `-WhatIf` to preview registration, `-Verbose` to display the generated action and
+also enable verbose rollover logging, and `-Force` to create or update the task
+without confirmation.
+
+If the `AzKerberosRollOver` task already exists in the root Task Scheduler folder,
+the setup script updates its action, trigger, SYSTEM principal, and settings with
+`Set-ScheduledTask`. Otherwise, it creates the task. The task description records:
+
+- the purpose of `azKerberosRollover.ps1`,
+- the rollover account,
+- the full script path,
+- the configured schedule, and
+- the Microsoft seamless SSO Kerberos rollover documentation link.
+
+Task Scheduler terminates a rollover process that runs for longer than one hour.
+Parallel task instances are not started while an earlier run is still active.
+
+## Monitoring
+
+The script writes detailed execution information to:
+
+- `<LogPath>\azKerberosRollover.ps1.log`
+- The Windows Application event log with the source `AzureKrbRollOver`
+
+When `-LogPath` is not specified, the log file is written to `%LOCALAPPDATA%` of the account running the script. The active log is rotated to a single `.sav` file when it exceeds 1 MB.
+
+Read the latest entries from a configured log directory:
+
+```powershell
+Get-Content 'C:\Logs\azKerberosRollover.ps1.log' -Tail 50
+```
+
+Read recent Windows events generated by the script:
+
+```powershell
+Get-WinEvent -FilterHashtable @{
+    LogName      = 'Application'
+    ProviderName = 'AzureKrbRollOver'
+} -MaxEvents 20
+```
+
+See the [event ID reference](EventID.md) for the events, severities, and messages written by the script.
+
+> [!NOTE]
+> `-WhatIf` does not create or modify log files, event sources, or Windows events.
 
 ## Script parameters
 
@@ -315,35 +424,6 @@ For complete PowerShell help, run:
 Get-Help $scriptPath -Full
 ```
 
-## Monitoring
-
-The script writes detailed execution information to:
-
-- `<LogPath>\azKerberosRollover.ps1.log`
-- The Windows Application event log with the source `AzureKrbRollOver`
-
-When `-LogPath` is not specified, the log file is written to `%LOCALAPPDATA%` of the account running the script. The active log is rotated to a single `.sav` file when it exceeds 1 MB.
-
-Read the latest entries from a configured log directory:
-
-```powershell
-Get-Content 'C:\Logs\azKerberosRollover.ps1.log' -Tail 50
-```
-
-Read recent Windows events generated by the script:
-
-```powershell
-Get-WinEvent -FilterHashtable @{
-    LogName      = 'Application'
-    ProviderName = 'AzureKrbRollOver'
-} -MaxEvents 20
-```
-
-See the [event ID reference](EventID.md) for the events, severities, and messages written by the script.
-
-> [!NOTE]
-> `-WhatIf` does not create or modify log files, event sources, or Windows events.
-
 ## Troubleshooting
 
 Start troubleshooting by reviewing the local log file and the Windows Application events. Use the [event ID reference](EventID.md) to identify the failed stage and its meaning.
@@ -355,21 +435,21 @@ The scheduled PowerShell process returns the following exit codes to Task Schedu
 | Exit code | Decimal | Meaning | Recommended action |
 | --- | ---: | --- | --- |
 | `0x0` | `0` | The script completed successfully, or `-WhatIf` completed without making changes. | No action is required. |
-| `0x1` | `1` | The rollover workflow terminated with an error. | Review the local log and Windows Application events to identify the failed operation. |
 | `0x3EA` | `1002` | The `AzureKrbRollOver` Windows event source could not be created. | Run the task with administrative rights or create the event source before the next run. |
 | `0x3EB` | `1003` | The updated worker account password was not available in Microsoft Entra ID after five minutes. | Check Entra Connect synchronization health and password hash synchronization before retrying. |
+| `0x3EC` | `1004` | Microsoft Entra authentication was blocked by an MFA or Conditional Access requirement. | Review the failed sign-in, per-user MFA, and the applied Conditional Access policies. Exclude the noninteractive rollover account only after an appropriate security review, or use a supported authentication design that satisfies the requirement. |
+| `0x1` | `1` | The rollover workflow terminated with another error or ended before completion. | Review the local log and Windows Application events to identify the failed operation. |
 
 The most recent result is displayed in the **Last Run Result** column in Task Scheduler. A value other than `0x0` indicates that the execution requires investigation.
 
-### Event errors
+### Windows Event Log
 
 The following errors can be written to the Windows Application event log. See the [event ID reference](EventID.md) for the complete event catalog.
 
 | Event ID | Error | Recommended action |
 | --- | --- | --- |
-| `3102` | The worker account password could not be reset because access was denied. | Verify that the task runs as `SYSTEM` and that the Entra Connect server computer account has **Reset Password** on the protected worker account. |
-| `3103` | Multifactor authentication is enforced for the worker account. | Review the authentication requirements and Conditional Access policies applied to the worker account. |
-| `3104` | Authentication of the worker account was blocked by multifactor requirements. | Confirm that the account and device context satisfy the applicable Conditional Access policies. |
+| `3102` | Access was denied while resetting the worker account or running `Update-AzureADSSOForest`. | For password-reset failures, verify that the task runs as `SYSTEM` and that the Entra Connect server computer account has **Reset Password** on the protected worker account. For update failures after successful authentication, verify the worker account's **Hybrid Identity Administrator** role and its required Active Directory permissions on `AzureADSSOAcc`. |
+| `3103` | Microsoft Entra authentication was blocked by an MFA or Conditional Access requirement. | Review the failed sign-in, per-user MFA, and the Conditional Access policies shown in the Microsoft Entra sign-in log. |
 | `3105` | The new worker account password is not available in Microsoft Entra ID. | Check Entra Connect synchronization health, password hash synchronization, and the worker account's synchronization scope. |
 | `3106` | `AzureADSSOAcc` could not be found through the Global Catalog. | Verify that seamless SSO is configured and that the Entra Connect server can contact a Global Catalog. |
 | `3108` | The `AzureADSSOAcc` password was not updated by the rollover. | Review the job output and authentication events, then confirm connectivity to the PDC emulator before retrying. |

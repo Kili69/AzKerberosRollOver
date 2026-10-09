@@ -10,11 +10,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Added standard PowerShell verbose output, including the log file path and verbose
   output from the AzureADSSO background job.
+- Added a detailed WhatIf validation summary with resolved identities, effective
+  permissions, TGT status, synchronization strategy, and planned actions.
+- Added AADSTS-based authentication failure classification with immediate termination
+  and a shared exit code for MFA and Conditional Access failures.
+- Added phase-specific errors that distinguish Microsoft Entra authentication failures
+  from access denied while running `Update-AzureADSSOForest`.
+- Corrected the delegated `AzureADSSOAcc` permission from Change Password to Write,
+  which is required by `Update-AzureADSSOForest`.
 - Added support for resolving the rollover account as a `sAMAccountName`, UPN, or
   `DOMAIN\sAMAccountName`.
 - Added an unconditional startup version display.
 - Added preflight checks for the executing principal's Reset Password permission on
-  the rollover account and the rollover account's Change/Reset Password permissions
+  the rollover account and the rollover account's Write/Reset Password permissions
   on `AzureADSSOAcc`.
 - Added `Set-AzKerberosRolloverPermissions.ps1` to protect the rollover user with the
   domain's `AdminSDHolder` DACL, grant Reset Password to the Entra Connect computer,
@@ -23,6 +31,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   without bypassing `-WhatIf`.
 - Added an unconditional version display to the permission setup script and replaced
   ActiveDirectory cmdlet-import noise with one concise module status message.
+- Added comprehensive inline and function-level documentation to the permission setup
+  script, including its identity resolution, ACL, AdminSDHolder, and delegation logic.
+- Documented every regular expression and regex-based split operation in the
+  permission setup script.
+- Added comprehensive inline documentation to the rollover script, including an
+  explanation for every regular expression and regex-based split operation.
+- Added comprehensive function and inline documentation to the scheduled-task setup
+  script, including an explanation for every regular expression.
+- Added `New-AzKerberosRolloverScheduleTask.ps1` with interactive defaults, daily,
+  weekly, and hourly triggers, SYSTEM execution, optional log and verbose arguments,
+  and support for `-WhatIf` and `-Force`.
+- Added detection of an existing `AzKerberosRollOver` task so its parameters are
+  updated with `Set-ScheduledTask` instead of registering a replacement.
+- Improved interactive scheduled-task path validation with a clear missing-script
+  message and a repeated prompt instead of terminating immediately.
+- Changed the interactive task setup path default to the parent directory when the
+  current directory is named `tools`.
+- Added Active Directory validation for the scheduled task's rollover account, with
+  repeated prompting for invalid interactive input and a terminating parameter error.
+- Added explicit `TimeToRun` validation that repeats invalid interactive input and
+  terminates for an invalid parameter value.
+- Added explicit `Repeat` validation that repeats invalid interactive input and
+  terminates for an invalid parameter value.
+- Added `LogPath` validation that repeats invalid interactive input, allows an empty
+  value for the rollover script default, and terminates for an invalid parameter.
+- Added a scheduled task description containing the rollover purpose, account, script
+  path, schedule, and Microsoft Kerberos rollover documentation link.
+- Added a one-hour execution time limit to terminate stalled scheduled task runs.
 
 ### Changed
 
@@ -48,6 +84,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   original exception message in final error reporting.
 - Supported Active Directory module versions that return `tokenGroups` entries as
   `SecurityIdentifier` objects instead of raw SID byte arrays.
+- Read the final `AzureADSSOAcc` password timestamp from the PDC emulator of the
+  account's actual domain.
+- Prevented interrupted or incomplete rollover runs from reporting successful
+  completion.
 
 ## [0.1.20261009.1] - 2026-10-09
 

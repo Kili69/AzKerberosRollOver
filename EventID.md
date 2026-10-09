@@ -13,8 +13,7 @@ This script writes events t the application log and to the Debuglog File. The fo
 |3007    | Information | Impersonation account information                                          |
 |3008    | Warning     |Skipping the TGT lifetime check as the IgnoreTGTLifetimeCheck switch is set |
 |3102    | Error       | A required AD password permission is missing or access was denied          |
-|3103    | Error       | Multifactor enforced for the reset account                                 |
-|3104    | Error       | Multifactor enforced for the reset account                                 |
+|3103    | Error       | Microsoft Entra authentication was blocked by MFA or Conditional Access    |
 |3105    | Error       | Password Error, the password is not synced to Entra.ID                     |
 |3106    | Error       | The AzuerADssoACC account could not be found in the global catalog         |
 |3107    | Warning     | The latest password reset doesn't expired the TGT lifetime                 |

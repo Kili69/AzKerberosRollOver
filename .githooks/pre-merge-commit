@@ -3,4 +3,4 @@
 repo_root="$(git rev-parse --show-toplevel)" || exit 1
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass \
-    -File "$repo_root/tools/Update-Version.ps1"
+    -File "$repo_root/development/Update-Version.ps1"

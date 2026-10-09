@@ -12,7 +12,10 @@ This document contains contributor information that is intentionally kept separa
 | [`CHANGELOG.md`](CHANGELOG.md) | Automatically maintained release history. |
 | [`LICENSE`](LICENSE) | MIT License terms for this project. |
 | [`.githooks/`](.githooks/) | Repository-managed hooks for regular and merge commits. |
-| [`tools/Update-Version.ps1`](tools/Update-Version.ps1) | Version and changelog generator called by the hooks. |
+| [`tools/`](tools/) | Operational setup tools that are copied to the target system with the main script. |
+| [`development/`](development/) | Development-only validation and automation scripts; do not copy this directory to the target system. |
+| [`development/Update-Version.ps1`](development/Update-Version.ps1) | Version and changelog generator called by the hooks. |
+| [`development/Test-Changelog.ps1`](development/Test-Changelog.ps1) | Changelog validation used by the GitHub Actions workflow. |
 
 ## Initial setup
 
@@ -80,7 +83,7 @@ The repository uses two hooks:
 Both hooks invoke:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Update-Version.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\development\Update-Version.ps1
 ```
 
 The updater performs these steps:
@@ -103,6 +106,16 @@ The `Changelog` GitHub Actions workflow runs for every push and pull request. It
 - [`CHANGELOG.md`](CHANGELOG.md) has no release entry for the script version contained in that commit.
 
 The workflow does not modify repository history. If it fails, enable the repository Git hooks, recreate the affected commit, and push the corrected history.
+
+## Release package
+
+Publishing a GitHub release runs the `Release package` workflow. It creates and attaches an installation archive named `AzKerberosRollOver-<tag>.zip` containing only:
+
+- `azKerberosRollover.ps1`
+- Markdown files from the repository root
+- The complete `tools` directory
+
+Development automation, Git hooks, workflow definitions, and repository metadata are not included in the installation archive. GitHub additionally provides its automatically generated source-code archives for every release; those archives contain the complete repository and are independent of the curated installation package.
 
 Configure **Verify changelog** as a required status check in the repository branch ruleset to prevent pull requests with missing changelog updates from being merged.
 
@@ -248,7 +261,7 @@ Run the updater directly to diagnose an error:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-    -File .\tools\Update-Version.ps1
+    -File .\development\Update-Version.ps1
 ```
 
 The direct command modifies and stages the versioned script and changelog. Review those changes before retrying the commit.

@@ -1,0 +1,46 @@
+name: Release package
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Create installation package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build installation package
+        id: package
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $safeTag = $env:RELEASE_TAG -replace '[^A-Za-z0-9._-]', '-'
+          $packageName = "AzKerberosRollOver-$safeTag"
+          $stagingPath = Join-Path $env:RUNNER_TEMP $packageName
+          $archivePath = Join-Path $env:GITHUB_WORKSPACE "$packageName.zip"
+
+          New-Item -ItemType Directory -Path $stagingPath | Out-Null
+          Copy-Item -LiteralPath './azKerberosRollover.ps1' -Destination $stagingPath
+          Copy-Item -Path './*.md' -Destination $stagingPath
+          Copy-Item -LiteralPath './tools' -Destination $stagingPath -Recurse
+
+          Compress-Archive -Path (Join-Path $stagingPath '*') -DestinationPath $archivePath
+          "archive_path=$archivePath" >> $env:GITHUB_OUTPUT
+
+      - name: Attach installation package to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+        run: |
+          gh release upload $env:RELEASE_TAG $env:ARCHIVE_PATH --clobber
