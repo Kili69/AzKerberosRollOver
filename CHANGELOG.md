@@ -9,8 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - Corrected the README branch badge and link to reference the default `main` branch.
-- Made the release workflow exit successfully without creating a duplicate when the
-  current version already exists as a GitHub release.
+- Made the authenticated release workflow exit successfully without creating a
+  duplicate when the current version already exists as a GitHub release.
 
 ## [1.0.20261009.12] - 2026-10-09
 
