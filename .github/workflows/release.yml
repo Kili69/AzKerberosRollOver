@@ -1,0 +1,79 @@
+name: Release package
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Create release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build installation package
+        id: package
+        shell: pwsh
+        run: |
+          $scriptContent = Get-Content -LiteralPath './azKerberosRollover.ps1' -Raw
+          $versionMatch = [regex]::Match(
+            $scriptContent,
+            '(?m)^\.VERSION\s+(?<version>\d+\.\d+\.\d{8}\.\d+)\s*$'
+          )
+          if (-not $versionMatch.Success) {
+            throw 'No release version was found in azKerberosRollover.ps1.'
+          }
+
+          $version = $versionMatch.Groups['version'].Value
+          $changelogContent = Get-Content -LiteralPath './CHANGELOG.md' -Raw
+          $escapedVersion = [regex]::Escape($version)
+          $releasePattern = "(?ms)^## \[$escapedVersion\] - \d{4}-\d{2}-\d{2}[^\S\r\n]*\r?\n(?<notes>.*?)(?=^## \[|\z)"
+          $releaseMatch = [regex]::Match($changelogContent, $releasePattern)
+          if (-not $releaseMatch.Success) {
+            throw "CHANGELOG.md has no release section for version $version."
+          }
+
+          $releaseNotes = $releaseMatch.Groups['notes'].Value.Trim()
+          if ([string]::IsNullOrWhiteSpace($releaseNotes)) {
+            throw "The CHANGELOG.md release section for version $version is empty."
+          }
+
+          $packageName = "AzKerberosRollOver-$version"
+          $stagingPath = Join-Path $env:RUNNER_TEMP $packageName
+          $archivePath = Join-Path $env:GITHUB_WORKSPACE "$packageName.zip"
+          $releaseNotesPath = Join-Path $env:RUNNER_TEMP "release-notes-$version.md"
+
+          New-Item -ItemType Directory -Path $stagingPath | Out-Null
+          Copy-Item -LiteralPath './azKerberosRollover.ps1' -Destination $stagingPath
+          Copy-Item -Path './*.md' -Destination $stagingPath
+          Copy-Item -LiteralPath './tools' -Destination $stagingPath -Recurse
+
+          Compress-Archive -Path (Join-Path $stagingPath '*') -DestinationPath $archivePath
+          [System.IO.File]::WriteAllText($releaseNotesPath, $releaseNotes)
+          "archive_path=$archivePath" >> $env:GITHUB_OUTPUT
+          "release_notes_path=$releaseNotesPath" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+          RELEASE_NOTES_PATH: ${{ steps.package.outputs.release_notes_path }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          $tag = "v$env:VERSION"
+          gh release create $tag $env:ARCHIVE_PATH `
+            --target $env:GITHUB_SHA `
+            --title "AzKerberosRollOver $env:VERSION" `
+            --notes-file $env:RELEASE_NOTES_PATH
