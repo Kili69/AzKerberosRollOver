@@ -91,11 +91,12 @@ The updater performs these steps:
 1. Reads the current `.VERSION` value from the main script.
 2. Calculates the date and daily counter from the commit parent or merge parents.
 3. Updates `.VERSION`, `$ScriptVersion`, and the version badge in [`README.md`](README.md).
-4. Converts the currently staged file statuses into a changelog entry.
-5. Inserts or refreshes the matching entry in [`CHANGELOG.md`](CHANGELOG.md).
-6. Stages the script and changelog so they are included in the same commit.
+4. Moves existing notes from `Unreleased` into the new version section.
+5. Converts the currently staged file statuses into additional changelog entries.
+6. Updates the `Unreleased` comparison link and adds the version's release link.
+7. Stages the script, README, and changelog so they are included in the same commit.
 
-The update is idempotent for a pending version. Retrying a failed commit refreshes the existing changelog entry instead of appending a duplicate.
+The update is idempotent for a pending version. Retrying a failed commit retains the existing release notes instead of appending a duplicate.
 
 ## GitHub changelog validation
 
@@ -109,7 +110,7 @@ The workflow does not modify repository history. If it fails, enable the reposit
 
 ## Release package
 
-Every push to `main` runs the `Release package` workflow. The workflow reads the version from `.VERSION` in `azKerberosRollover.ps1`, creates the tag `v<version>`, publishes a GitHub release, and attaches an installation archive named `AzKerberosRollOver-<version>.zip` containing only:
+Every push to `main` runs the `Release package` workflow. The workflow reads the version from `.VERSION` in `azKerberosRollover.ps1` and requires a nonempty matching section in [`CHANGELOG.md`](CHANGELOG.md). It creates the tag `v<version>`, uses that changelog section as the GitHub release notes, publishes the release, and attaches an installation archive named `AzKerberosRollOver-<version>.zip` containing only:
 
 - `azKerberosRollover.ps1`
 - Markdown files from the repository root

@@ -4,19 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.0.20261009.9] - 2026-10-09
+## [Unreleased]
+
+
+## [1.0.20261009.10] - 2026-10-09
 
 ### Changed
 
 - Modified: `.github/workflows/release.yml`
-- Renamed: `developer.md` to `DEVELOPER.md`
-- Renamed: `EventID.md` to `EVENTID.md`
-- Modified: `README.md`
-- Modified: `azKerberosRollover.ps1`
+- Modified: `CHANGELOG.md`
+- Modified: `DEVELOPER.md`
 - Modified: `development/Test-Changelog.ps1`
 - Modified: `development/Update-Version.ps1`
 
-## [Unreleased]
+
+## [1.0.20261009.9] - 2026-10-09
 
 ### Added
 
@@ -82,6 +84,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the comment-based help description.
 - Evaluated the local computer account and its AD groups during permission preflight
   when the rollover task runs as local SYSTEM.
+- Added automatic GitHub release creation with a curated installation package when
+  `dev` is pushed to `main`.
+- Moved development-only version and changelog scripts out of the operational
+  `tools` directory.
+- Added version, branch, and Buy Me a Coffee badges to the README.
+- Renamed the developer and event ID references to `DEVELOPER.md` and `EVENTID.md`.
+- Added comprehensive documentation for the development automation scripts.
+- Synchronized the README version badge through the version update hook.
 
 ### Fixed
 
@@ -267,7 +277,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Added the initial script.
 
-[Unreleased]: https://github.com/Kili69/AzKerberosRollOver/compare/55cca79077179e307f13cc95efac04f50a8a76c4...HEAD
+[Unreleased]: https://github.com/Kili69/AzKerberosRollOver/compare/v1.0.20261009.10...HEAD
+[1.0.20261009.10]: https://github.com/Kili69/AzKerberosRollOver/releases/tag/v1.0.20261009.10
+[1.0.20261009.9]: https://github.com/Kili69/AzKerberosRollOver/releases/tag/v1.0.20261009.9
 [0.1.20261008.2]: https://github.com/Kili69/AzKerberosRollOver/commit/55cca79077179e307f13cc95efac04f50a8a76c4
 [0.1.20261008.1]: https://github.com/Kili69/AzKerberosRollOver/commit/fd1e89758b08519714fbf22b27709be380e713cf
 [0.1.20261007.1]: https://github.com/Kili69/AzKerberosRollOver/commit/f7461b10e7050d0a1bae7721b82e21115d6bf347

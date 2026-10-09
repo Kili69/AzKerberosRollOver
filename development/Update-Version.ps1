@@ -13,9 +13,8 @@ azKerberosRollover.ps1, updates the version badge in README.md, generates a
 CHANGELOG.md entry from the staged Git changes, writes the files as UTF-8
 without a byte-order mark, and stages the generated files.
 
-The generated changelog entry is idempotent. Re-running the hook for the same
-pending version replaces that version's existing entry instead of appending a
-duplicate.
+Existing notes under Unreleased are moved into the new version section.
+Re-running the hook for the same pending version does not append a duplicate.
 
 .EXAMPLE
 .\Update-Version.ps1
@@ -215,19 +214,38 @@ if (-not $changeDescriptions) {
     $changeDescriptions = '- Commit without staged project changes.'
 }
 
-$entryDate = Get-Date -Format 'yyyy-MM-dd'
-$entry = "## [$version] - $entryDate`r`n`r`n### Changed`r`n`r`n"
-$entry += ($changeDescriptions -join "`r`n") + "`r`n`r`n"
-
 if (Test-Path -LiteralPath $changelogPath -PathType Leaf) {
     $changelogContent = [System.IO.File]::ReadAllText($changelogPath)
 }
 else {
-    $changelogContent = "# Changelog`r`n`r`nAll notable changes to this project are documented in this file.`r`n`r`n"
+    $changelogContent = "# Changelog`n`nAll notable changes to this project are documented in this file.`n`n## [Unreleased]`n`n"
 }
 
-# Re-running the hook before a commit uses the same version. Replace that version's
-# complete changelog section so retries never create duplicate entries.
+$newline = if ($changelogContent.Contains("`r`n")) { "`r`n" } else { "`n" }
+
+# Regex breakdown:
+# (?ms)                         enables multiline anchors and lets dot match newlines.
+# ^## \[Unreleased\]            locates the literal Unreleased heading.
+# [^\S\r\n]*\r?\n               accepts horizontal whitespace and either newline style.
+# (?<content>.*?)               captures the section body non-greedily.
+# (?=^## \[|\z)                 stops before the next release heading or end of input.
+$unreleasedPattern = '(?ms)^## \[Unreleased\][^\S\r\n]*\r?\n(?<content>.*?)(?=^## \[|\z)'
+$unreleasedMatch = [regex]::Match($changelogContent, $unreleasedPattern)
+if (-not $unreleasedMatch.Success) {
+    throw 'CHANGELOG.md does not contain an Unreleased section.'
+}
+
+$unreleasedContent = $unreleasedMatch.Groups['content'].Value.Trim()
+$entryDate = Get-Date -Format 'yyyy-MM-dd'
+$entry = "## [$version] - $entryDate$newline$newline"
+if (-not [string]::IsNullOrWhiteSpace($unreleasedContent)) {
+    $entry += $unreleasedContent + "$newline$newline"
+}
+$entry += "### Changed$newline$newline"
+$entry += ($changeDescriptions -join $newline) + "$newline$newline"
+
+# Re-running the hook before a commit uses the same version. If Unreleased has
+# already been consumed, retain the existing entry rather than losing its release notes.
 $escapedVersion = [regex]::Escape($version)
 
 # Regex breakdown:
@@ -237,20 +255,68 @@ $escapedVersion = [regex]::Escape($version)
 # (?=^## \[|\z)            stops before the next release heading or absolute end
 #                           of input without consuming that boundary.
 $existingEntryPattern = "(?ms)^## \[$escapedVersion\] - .*?(?=^## \[|\z)"
-if ([regex]::IsMatch($changelogContent, $existingEntryPattern)) {
-    $changelogContent = [regex]::Replace($changelogContent, $existingEntryPattern, $entry, 1)
-}
-else {
-    $firstReleaseIndex = $changelogContent.IndexOf('## [')
-    if ($firstReleaseIndex -ge 0) {
-        $changelogContent = $changelogContent.Insert($firstReleaseIndex, $entry)
+if (-not ([regex]::IsMatch($changelogContent, $existingEntryPattern) -and
+        [string]::IsNullOrWhiteSpace($unreleasedContent))) {
+    # Clear Unreleased before promoting its previous content into the release entry.
+    $changelogContent = [regex]::Replace(
+        $changelogContent,
+        $unreleasedPattern,
+        "## [Unreleased]$newline$newline",
+        1
+    )
+
+    if ([regex]::IsMatch($changelogContent, $existingEntryPattern)) {
+        $changelogContent = [regex]::Replace($changelogContent, $existingEntryPattern, $entry, 1)
     }
     else {
-        if (-not $changelogContent.EndsWith("`n")) {
-            $changelogContent += "`r`n"
-        }
-        $changelogContent += "`r`n$entry"
+        # Insert the newest version directly after Unreleased, as required by
+        # the Keep a Changelog ordering convention.
+        $unreleasedHeadingRegex = [regex]::new('(?m)^## \[Unreleased\][^\S\r\n]*$')
+        $changelogContent = $unreleasedHeadingRegex.Replace(
+            $changelogContent,
+            {
+                param($match)
+
+                return "$($match.Value)$newline$newline$entry"
+            },
+            1
+        )
     }
+}
+
+# Keep the comparison links synchronized with the newest generated version.
+$repositoryUrl = 'https://github.com/Kili69/AzKerberosRollOver'
+$unreleasedReference = "[Unreleased]: $repositoryUrl/compare/v$version...HEAD"
+$unreleasedReferencePattern = '(?m)^\[Unreleased\]:\s+.*$'
+if ([regex]::IsMatch($changelogContent, $unreleasedReferencePattern)) {
+    $changelogContent = [regex]::Replace(
+        $changelogContent,
+        $unreleasedReferencePattern,
+        $unreleasedReference,
+        1
+    )
+}
+else {
+    $changelogContent += "$newline$unreleasedReference$newline"
+}
+
+$versionReference = "[$version]: $repositoryUrl/releases/tag/v$version"
+$versionReferencePattern = "(?m)^\[$escapedVersion\]:\s+.*$"
+if ([regex]::IsMatch($changelogContent, $versionReferencePattern)) {
+    $changelogContent = [regex]::Replace(
+        $changelogContent,
+        $versionReferencePattern,
+        $versionReference,
+        1
+    )
+}
+else {
+    $changelogContent = [regex]::Replace(
+        $changelogContent,
+        $unreleasedReferencePattern,
+        "$unreleasedReference$newline$versionReference",
+        1
+    )
 }
 
 # Write all generated content only after every calculation and validation succeeds.

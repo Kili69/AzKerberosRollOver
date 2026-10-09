@@ -175,15 +175,29 @@ foreach ($commit in $commits) {
     ) -join "`n"
 
     # Regex breakdown:
-    # (?m)                 enables line-based ^ and $ anchors.
+    # (?ms)                enables line-based anchors and lets dot match newlines.
     # ^## \[...\] -        requires a Markdown H2 heading with the version in brackets.
     # [regex]::Escape()    makes every dot in the generated version literal instead of
     #                       treating it as the regex wildcard character.
     # \d{4}-\d{2}-\d{2}   requires an ISO-style yyyy-MM-dd date.
-    # \s*$                 permits trailing whitespace before the heading line ends.
-    $entryPattern = "(?m)^## \[$([regex]::Escape($version))\] - \d{4}-\d{2}-\d{2}\s*$"
-    if (-not [regex]::IsMatch($changelogContent, $entryPattern)) {
+    # [^\S\r\n]*\r?\n      accepts horizontal whitespace and either newline style.
+    # (?<content>.*?)      captures the release notes non-greedily.
+    # (?=^## \[|\z)        stops before the next release heading or end of input.
+    $entryPattern = "(?ms)^## \[$([regex]::Escape($version))\] - \d{4}-\d{2}-\d{2}[^\S\r\n]*\r?\n(?<content>.*?)(?=^## \[|\z)"
+    $entryMatch = [regex]::Match($changelogContent, $entryPattern)
+    if (-not $entryMatch.Success) {
         $failures.Add("$commit updates CHANGELOG.md but has no entry for version $version.")
+        continue
+    }
+
+    if ([string]::IsNullOrWhiteSpace($entryMatch.Groups['content'].Value)) {
+        $failures.Add("$commit has an empty CHANGELOG.md entry for version $version.")
+        continue
+    }
+
+    $unreleasedIndex = $changelogContent.IndexOf('## [Unreleased]')
+    if ($unreleasedIndex -lt 0 -or $unreleasedIndex -gt $entryMatch.Index) {
+        $failures.Add("$commit must place the Unreleased section before version $version.")
         continue
     }
 

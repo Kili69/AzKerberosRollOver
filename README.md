@@ -9,7 +9,7 @@
   [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
   [![Microsoft Entra](https://img.shields.io/badge/Microsoft-Entra_ID-5C2D91?logo=microsoft&logoColor=white)](https://www.microsoft.com/security/business/identity-access/microsoft-entra-id)
   [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-  [![Version](https://img.shields.io/badge/version-1.0.20261009.9-2EA44F)](CHANGELOG.md)
+  [![Version](https://img.shields.io/badge/version-1.0.20261009.10-2EA44F)](CHANGELOG.md)
   [![Branch](https://img.shields.io/badge/branch-dev-1F6FEB?logo=git&logoColor=white)](https://github.com/Kili69/AzKerberosRollOver/tree/dev)
   <br>
   [![☕ Buy me a coffee](https://img.shields.io/badge/%E2%98%95-Buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/andreaslmuz)
